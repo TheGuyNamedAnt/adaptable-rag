@@ -1,5 +1,6 @@
 import {
   buildEvalBenchmarkSnapshot,
+  buildRegressionDashboardArtifact,
   breakawaySupportProfile,
   compareEvalBenchmarks,
   genericDocsProfile,
@@ -19,6 +20,10 @@ const benchmark = buildEvalBenchmarkSnapshot(
   summary,
   options.generatedAt ?? new Date().toISOString()
 );
+const dashboard = buildRegressionDashboardArtifact(
+  summary,
+  options.generatedAt ?? benchmark.generatedAt
+);
 let regression;
 
 if (options.baselinePath) {
@@ -34,6 +39,7 @@ if (options.reportDir) {
   await writeReportArtifacts(options.reportDir, {
     summary,
     benchmark,
+    dashboard,
     ...(regression ? { regression } : {})
   });
 }
@@ -66,6 +72,7 @@ async function writeReportArtifacts(reportDir, bundle) {
   await mkdir(reportDir, { recursive: true });
   await writeJson(path.join(reportDir, "summary.json"), bundle.summary);
   await writeJson(path.join(reportDir, "benchmark.json"), bundle.benchmark);
+  await writeJson(path.join(reportDir, "dashboard.json"), bundle.dashboard);
   if (bundle.regression) {
     await writeJson(path.join(reportDir, "regression.json"), bundle.regression);
   }

@@ -54,6 +54,8 @@ npm run company:smoke:postgres -- \
 
 The Postgres smoke applies migrations, runs startup readiness against Postgres and pgvector, runs full company smoke, then runs delta company smoke. It writes `.rag/company-postgres-smoke/latest/postgres-company-smoke.json` plus nested full and delta smoke artifacts. `--local-provider` is only for deterministic storage validation; omit it and use `--env-file .env.company-production --probe-providers` for real provider deployment checks.
 
+GitHub Actions includes the same storage gate in `.github/workflows/company-postgres-smoke.yml`. It starts `pgvector/pgvector:pg17`, runs `npm run company:smoke:postgres -- --local-provider --reset-schema --probe-providers`, and uploads `.rag/company-postgres-smoke/ci` for release review or failure diagnosis.
+
 Production ingestion also writes durable run state to `rag_core.ingestion_jobs`. Each job records the tenant, namespace, source ids, status, current stage, checkpoint payload, safe counts, and redacted error fields. Reusing a failed `runId` resumes from completed source/document checkpoints in that durable record; reusing a completed `runId` starts a fresh replace-style pass through the same job id. An already running job is rejected so two workers do not silently race on the same ingest run.
 
 Incremental source connectors should persist their sync ledger in Postgres through `PostgresSourceSyncLedgerStore`. The core schema includes `rag_core.source_sync_ledgers` for the current safe ledger JSON and `rag_core.source_sync_ledger_entries` for queryable source item state, including active records, deleted tombstones, failed retry state, safe hashes, and cursors. These tables are the production basis for delta syncs and delete propagation without reloading entire company sources.
@@ -124,7 +126,7 @@ npm run company:smoke -- \
 
 The smoke loads the compiled company module, runs pack contracts, runs `sync --mode delta` unless `--skip-sync` is set, then runs `validate-config --self-test true`. It writes `.rag/company-smoke/latest/smoke.json` with only safe gate status, counts, warnings, and failures; connector records, source bodies, chunks, cursor values, credentials, provider payloads, and raw principal claims are excluded. Add `--sync-mode full` for reconciliation drills and `--probe-providers` only during controlled deployment checks.
 
-Use `templates/company-connector-pack/` for a copyable company integration skeleton. It includes a company profile, adapter pack, source connector, corpus adapter, permission mapper, and a pack contract test that can be kept in the company deployment repo.
+Use `templates/company-connector-pack/` for a copyable company integration skeleton. It includes a company profile, adapter pack, source connector, corpus adapter, permission mapper, starter eval JSONL, and a pack contract test that can be kept in the company deployment repo. The fixture shows delta cursor handoff, complete full-sync behavior, tombstone-safe deletes, and redacted ACL fingerprints.
 
 `002_vector_hnsw_1536.sql` is dimension-specific. If the embedding provider uses a dimension other than `1536`, copy that migration and replace `1536` with the configured `RAG_VECTOR_DIMENSIONS` value. `validate-config --self-test true` fails Postgres vector readiness when the pgvector extension, core tables, FTS index, dimensions, or dimension-specific ANN index are missing.
 

@@ -51,7 +51,7 @@ export const companyProfile: CompanyProfile = {
       sourceSystem: "company-docs-api",
       useCaseIds: ["docs"],
       contractTestCommand:
-        "npm run company:validate -- --module dist/company/company-profile.js --export companyProfile --adapter-pack-export companyAdapterPack --run-pack-contracts --use-case docs"
+        "npm run company:validate -- --module dist/company/company-profile.js --export companyProfile --adapter-pack-export companyAdapterPack --run-pack-contracts --use-case docs --contract-mode delta --contract-mode full --min-delta-returned-records 1 --disallow-connector-warnings"
     }
   ],
   evalPacks: [

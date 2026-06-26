@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { RagRunTrace } from "../observability/trace.js";
-import { breakawaySupportProfile } from "../profiles/examples/breakaway-support.profile.js";
+import { sampleSupportProfile } from "../profiles/examples/sample-support.profile.js";
 import type { RagIncidentBundle } from "./incident-bundle.js";
 import type { RagEvalCaseResult, RagEvalRunSummary } from "./eval-types.js";
 import { buildHumanReviewQueue, renderHumanReviewQueueMarkdown } from "./human-review-queue.js";
@@ -12,10 +12,10 @@ const GENERATED_AT = "2026-06-24T00:00:00.000Z";
 test("human review queue turns review-required evals into routed queue items", () => {
   const queue = buildHumanReviewQueue({
     generatedAt: GENERATED_AT,
-    profiles: [breakawaySupportProfile],
+    profiles: [sampleSupportProfile],
     evalSummary: evalSummary([
       caseResult({
-        id: "breakaway-refund-triage",
+        id: "sample-refund-triage",
         status: "human_review_required",
         trace: sampleTrace({ status: "human_review_required" })
       })
@@ -108,11 +108,11 @@ function evalSummary(cases: readonly RagEvalCaseResult[]): RagEvalRunSummary {
     failures: cases.flatMap((evalCase) => evalCase.failures),
     suites: [
       {
-        profileId: "breakaway-support",
-        namespaceId: "breakaway-support",
+        profileId: "sample-support",
+        namespaceId: "sample-support",
         passed,
-        goldenSetPath: "profiles/breakaway-support/evals/golden.jsonl",
-        adversarialSetPath: "profiles/breakaway-support/evals/adversarial.jsonl",
+        goldenSetPath: "profiles/sample-support/evals/golden.jsonl",
+        adversarialSetPath: "profiles/sample-support/evals/adversarial.jsonl",
         requiredChecks: ["retrieval_recall", "citation_required", "escalation_rule_match"],
         coveredChecks: ["retrieval_recall", "citation_required", "escalation_rule_match"],
         missingRequiredChecks: [],
@@ -149,8 +149,8 @@ function sampleTrace(overrides: Partial<RagRunTrace> = {}): RagRunTrace {
   return {
     runId,
     traceId,
-    profileId: "breakaway-support",
-    namespaceId: "breakaway-support",
+    profileId: "sample-support",
+    namespaceId: "sample-support",
     startedAt: GENERATED_AT,
     finishedAt: "2026-06-24T00:00:01.000Z",
     status: "human_review_required",

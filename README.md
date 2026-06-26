@@ -2,6 +2,28 @@
 
 Configurable RAG core for many use cases. The core owns safety, provenance, traceability, citations, and evaluation. Profiles configure domain behavior, allowed sources, output contracts, and escalation/refusal policy.
 
+## License
+
+No license is granted. All rights are reserved unless a license is added later.
+
+## Quick Start
+
+```bash
+nvm use
+npm ci
+npm run check
+npm run test
+```
+
+Use the generic docs profile for a local first pass:
+
+```bash
+npm run build
+RAG_APP_PROFILE_PRESET=generic-docs RAG_HTTP_AUTH_MODE=disabled npm run serve
+```
+
+Production-oriented drills start from `.env.example`, `deploy/README.md`, and the company deployment runbook in `deploy/company-production-runbook.md`.
+
 ## Current Slice
 
 Working in these parts of the system:
@@ -86,7 +108,7 @@ src/
     profile-registry.ts        Startup-time registry that rejects invalid profiles
     examples/
       generic-docs.profile.ts   Minimal reusable profile example
-      breakaway-support.profile.ts
+      sample-support.profile.ts
     presets/
       ultimate-default.profile.ts Strict production baseline profile
   corpus/
@@ -1114,9 +1136,9 @@ npm run company:smoke -- \
 
 The smoke runs the same compiled module through three gates: `validate-config --run-pack-contracts true`, `sync --mode delta`, and `validate-config --self-test true`. It writes `.rag/company-smoke/latest/smoke.json` with gate status, counts, warnings, and failures only. It does not include connector records, source bodies, chunk text, cursor values, credentials, provider payloads, or principal claims. For real provider probes during a controlled deployment check, add `--probe-providers`.
 
-For the Postgres/pgvector production target, start from `deploy/company-production.example.env` and follow `deploy/company-production-runbook.md`. That path keeps documents/chunks, text vectors, ingestion jobs, and source-sync ledgers in Postgres and uses the company smoke as the promotion gate before `serve`. For an actual local pgvector drill, start `deploy/postgres/docker-compose.pgvector.yml`, export `RAG_DATABASE_URL`, and run `npm run company:smoke:postgres -- --local-provider --reset-schema --probe-providers`.
+For the Postgres/pgvector production target, start from `deploy/company-production.example.env` and follow `deploy/company-production-runbook.md`. That path keeps documents/chunks, text vectors, ingestion jobs, and source-sync ledgers in Postgres and uses the company smoke as the promotion gate before `serve`. For an actual local pgvector drill, start `deploy/postgres/docker-compose.pgvector.yml`, export `RAG_DATABASE_URL`, and run `npm run company:smoke:postgres -- --local-provider --reset-schema --probe-providers`. The same storage gate is available in GitHub Actions as `Company Postgres Smoke`, with a pgvector service container and uploaded smoke artifacts.
 
-For a copyable company integration skeleton, use `templates/company-connector-pack/`. It exports a `CompanyProfile`, `CompanyAdapterPack`, corpus adapter, source connector, permission mapper, and contract test. The company replaces the source client and native ACL projection while keeping the same validation and deployment command shape.
+For a copyable company integration skeleton, use `templates/company-connector-pack/`. It exports a `CompanyProfile`, `CompanyAdapterPack`, corpus adapter, source connector, permission mapper, starter eval JSONL, and contract test. The company replaces the source client and native ACL projection while keeping the same validation and deployment command shape, including delta cursor handoff, complete full-sync fixtures, tombstone-safe deletes, and redacted ACL fingerprints.
 
 Run registered company packs through the company contract gate before accepting a company deployment:
 

@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { breakawaySupportProfile } from "../profiles/examples/breakaway-support.profile.js";
+import { sampleSupportProfile } from "../profiles/examples/sample-support.profile.js";
 import { genericDocsProfile } from "../profiles/examples/generic-docs.profile.js";
 import { ultimateDefaultProfile } from "../profiles/presets/ultimate-default.profile.js";
 import type { RagProfile } from "../profiles/profile.js";
@@ -17,7 +17,7 @@ import {
 
 test("declared profile eval suites pass and cover every required check", async () => {
   const summary = await runProfileEvalSuites({
-    profiles: [genericDocsProfile, breakawaySupportProfile, ultimateDefaultProfile],
+    profiles: [genericDocsProfile, sampleSupportProfile, ultimateDefaultProfile],
     projectRoot: process.cwd()
   });
 

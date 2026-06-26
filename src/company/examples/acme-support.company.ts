@@ -139,6 +139,11 @@ export const acmeSupportAdapterPack: CompanyAdapterPack = {
 
 export const acmeSupportAdapterPacks = [acmeSupportAdapterPack] as const;
 
+export const acmeSupportDeployment = {
+  company: acmeSupportCompanyProfile,
+  adapterPacks: acmeSupportAdapterPacks
+} as const;
+
 function acmeSupportRecord(request: CorpusLoadRequest | SourceConnectorSyncRequest): CorpusRecord {
   const body =
     "Acme support agents may use approved internal policy snippets for troubleshooting guidance.";

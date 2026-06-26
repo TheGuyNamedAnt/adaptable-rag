@@ -30,6 +30,15 @@ interface NormalizedCompanyDocsNativeAcl {
   readonly tags: readonly string[];
 }
 
+interface LoadedCompanyDocsPages {
+  readonly items: readonly CompanyDocsItem[];
+  readonly warnings: readonly {
+    readonly sourceId: string;
+    readonly code: string;
+    readonly message: string;
+  }[];
+}
+
 export interface CompanyDocsItem {
   readonly sourceItemId: string;
   readonly recordId: string;
@@ -79,6 +88,7 @@ export interface CompanyDocsClient {
   listDocuments(input: {
     readonly sourceId: string;
     readonly requestedAt: string;
+    readonly cursor?: string;
     readonly maxRecords?: number;
   }): Promise<CompanyDocsPage>;
   listChangedDocuments(input: {
@@ -94,7 +104,13 @@ export interface CompanyConnectorAdapterPackOptions {
   readonly client: CompanyDocsClient;
   readonly companyId?: string;
   readonly packId?: string;
+  readonly maxAdapterPages?: number;
 }
+
+const COMPANY_DOCS_ADAPTER_ID = "company-docs-api";
+const COMPANY_DOCS_CONNECTOR_ID = "company_docs_api";
+const COMPANY_DOCS_SOURCE_SYSTEM = "company-docs-api";
+const DEFAULT_MAX_ADAPTER_PAGES = 100;
 
 export const companyDocsClient: CompanyDocsClient = {
   async listDocuments(): Promise<CompanyDocsPage> {
@@ -116,19 +132,36 @@ export function createCompanyConnectorAdapterPack(
     id: options.packId ?? "company-docs-pack",
     companyId: options.companyId ?? "company_docs",
     description: "Company documentation connector pack.",
-    corpusAdapters: [new CompanyDocsCorpusAdapter(options.client)],
+    corpusAdapters: [
+      new CompanyDocsCorpusAdapter(
+        options.client,
+        options.maxAdapterPages ?? DEFAULT_MAX_ADAPTER_PAGES
+      )
+    ],
     sourceConnectors: [new CompanyDocsSourceConnector(options.client)],
     permissionMappers: [
       {
-        sourceSystem: "company-docs-api",
+        sourceSystem: COMPANY_DOCS_SOURCE_SYSTEM,
         mapper: companyDocsPermissionMapper
       }
     ],
     connectorTests: [
       {
-        connectorId: "company_docs_api",
+        connectorId: COMPANY_DOCS_CONNECTOR_ID,
         command:
-          "npm run company:validate -- --module dist/company/company-profile.js --export companyProfile --adapter-pack-export companyAdapterPack --run-pack-contracts --use-case docs"
+          "npm run company:validate -- --module dist/company/company-profile.js --export companyProfile --adapter-pack-export companyAdapterPack --run-pack-contracts --use-case docs --contract-mode delta --contract-mode full --min-delta-returned-records 1 --disallow-connector-warnings"
+      }
+    ],
+    corpusAdapterTests: [
+      {
+        adapterId: COMPANY_DOCS_ADAPTER_ID,
+        sourceId: COMPANY_DOCS_CONNECTOR_ID,
+        expectations: {
+          minLoadedRecords: 1,
+          minAcceptedDocuments: 1,
+          maxRejectedRecords: 0,
+          allowAdapterWarnings: false
+        }
       }
     ]
   };
@@ -153,30 +186,33 @@ export const companyDocsPermissionMapper: ConnectorAclMapper = ownerDefinedAclMa
 });
 
 export class CompanyDocsCorpusAdapter implements CorpusAdapter {
-  readonly id = "company-docs-api";
+  readonly id = COMPANY_DOCS_ADAPTER_ID;
   readonly description = "Loads approved company documentation records.";
   private readonly client: CompanyDocsClient;
+  private readonly maxPages: number;
 
-  constructor(client: CompanyDocsClient) {
+  constructor(client: CompanyDocsClient, maxPages = DEFAULT_MAX_ADAPTER_PAGES) {
     this.client = client;
+    this.maxPages = maxPages;
   }
 
   async load(request: CorpusLoadRequest): Promise<CorpusLoadResult> {
-    const page = await this.client.listDocuments({
+    const loaded = await loadCompanyDocsPages(this.client, {
       sourceId: request.source.id,
-      requestedAt: request.requestedAt
+      requestedAt: request.requestedAt,
+      maxPages: this.maxPages
     });
 
     return {
       sourceId: request.source.id,
-      records: page.items.map((item) => recordFromCompanyDocsItem(item, request)),
-      warnings: []
+      records: loaded.items.map((item) => recordFromCompanyDocsItem(item, request)),
+      warnings: loaded.warnings
     };
   }
 }
 
 export class CompanyDocsSourceConnector implements SourceConnector {
-  readonly id = "company_docs_api";
+  readonly id = COMPANY_DOCS_CONNECTOR_ID;
   readonly description = "Syncs approved company documentation changes.";
   private readonly client: CompanyDocsClient;
 
@@ -206,9 +242,14 @@ function sourceConnectorItem(item: CompanyDocsSyncItem, request: SourceConnector
     return {
       operation: "upsert" as const,
       sourceItemId: item.item.sourceItemId,
+      updatedAt: item.item.updatedAt,
       ...(item.item.version === undefined ? {} : { version: item.item.version }),
+      contentHash: item.item.checksum,
       record: recordFromCompanyDocsItem(item.item, request),
-      sourceAcl: redactedAclFingerprint(item.item.nativeAcl)
+      sourceAcl: redactedAclFingerprint(item.item.nativeAcl),
+      metadata: {
+        source_system: COMPANY_DOCS_SOURCE_SYSTEM
+      }
     };
   }
 
@@ -227,7 +268,7 @@ function sourceConnectorItem(item: CompanyDocsSyncItem, request: SourceConnector
     sourceItemId: item.sourceItemId,
     ...(item.recordId === undefined ? {} : { recordId: item.recordId }),
     errorCode: item.errorCode,
-    message: item.message,
+    message: safeConnectorErrorMessage(item),
     retryable: item.retryable ?? true
   };
 }
@@ -251,9 +292,59 @@ function recordFromCompanyDocsItem(
     checksum: item.checksum,
     metadata: {
       source_item_id: item.sourceItemId,
-      source_system: "company-docs-api"
+      source_system: COMPANY_DOCS_SOURCE_SYSTEM
     }
   };
+}
+
+async function loadCompanyDocsPages(
+  client: CompanyDocsClient,
+  input: {
+    readonly sourceId: string;
+    readonly requestedAt: string;
+    readonly maxPages: number;
+  }
+): Promise<LoadedCompanyDocsPages> {
+  const items: CompanyDocsItem[] = [];
+  const warnings: {
+    readonly sourceId: string;
+    readonly code: string;
+    readonly message: string;
+  }[] = [];
+  const seenCursors = new Set<string>();
+  let cursor: string | undefined;
+
+  for (let pageIndex = 0; pageIndex < input.maxPages; pageIndex += 1) {
+    const page = await client.listDocuments({
+      sourceId: input.sourceId,
+      requestedAt: input.requestedAt,
+      ...(cursor === undefined ? {} : { cursor })
+    });
+    items.push(...page.items);
+
+    if (page.cursor === undefined) {
+      return { items, warnings };
+    }
+
+    if (seenCursors.has(page.cursor)) {
+      warnings.push({
+        sourceId: input.sourceId,
+        code: "repeated_cursor",
+        message: "Company docs API returned a repeated pagination cursor."
+      });
+      return { items, warnings };
+    }
+
+    seenCursors.add(page.cursor);
+    cursor = page.cursor;
+  }
+
+  warnings.push({
+    sourceId: input.sourceId,
+    code: "page_limit_reached",
+    message: "Company docs API pagination reached the configured page limit."
+  });
+  return { items, warnings };
 }
 
 function accessScopeForItem(
@@ -300,6 +391,8 @@ function emptyNativeAcl(): NormalizedCompanyDocsNativeAcl {
 
 function redactedAclFingerprint(nativeAcl: CompanyDocsNativeAcl): Readonly<Record<string, number>> {
   return {
+    hasTenant: nativeAcl.tenantId ? 1 : 0,
+    hasNamespace: nativeAcl.namespaceId ? 1 : 0,
     teamCount: nativeAcl.teamIds?.length ?? 0,
     userCount: nativeAcl.userIds?.length ?? 0,
     roleCount: nativeAcl.roles?.length ?? 0,
@@ -320,7 +413,22 @@ function stringArray(value: unknown): readonly string[] {
     return [];
   }
 
-  return value.filter((entry): entry is string => typeof entry === "string" && entry.length > 0);
+  return uniqueStrings(
+    value
+      .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
+      .filter((entry) => entry.length > 0)
+  );
+}
+
+function safeConnectorErrorMessage(item: Extract<CompanyDocsSyncItem, { operation: "error" }>) {
+  return `Source item "${item.sourceItemId}" failed with safe connector code "${safeErrorCode(
+    item.errorCode
+  )}".`;
+}
+
+function safeErrorCode(value: string): string {
+  const normalized = value.replace(/[^0-9a-z_.-]/gi, "_").slice(0, 64);
+  return normalized.length === 0 ? "source_item_error" : normalized;
 }
 
 function uniqueStrings(values: readonly string[]): readonly string[] {

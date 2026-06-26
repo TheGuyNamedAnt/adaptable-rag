@@ -69,6 +69,7 @@ export interface RagEvalExpectation {
   readonly requiredLayoutRelationIds?: readonly string[];
   readonly requiredRelationshipPaths?: readonly RagEvalRelationshipPathExpectation[];
   readonly forbiddenRelationshipPaths?: readonly RagEvalRelationshipPathExpectation[];
+  readonly staleSourceRefusalExpected?: boolean;
 }
 
 export interface RagEvalRelationshipPathExpectation {
@@ -148,6 +149,21 @@ export interface RagEvalCaseResult {
   readonly visualCitationCount?: number;
   readonly traceId?: string;
   readonly trace?: RagRunTrace;
+  readonly metrics?: RagEvalCaseMetrics;
+}
+
+export interface RagEvalCaseMetrics {
+  readonly recallAtK?: number;
+  readonly mrr?: number;
+  readonly citationPrecision?: number;
+  readonly citationRecall?: number;
+  readonly refusalCorrectness?: boolean;
+  readonly accessBoundaryCorrectness?: boolean;
+  readonly staleSourceRefusal?: boolean;
+  readonly parserQualityImpact?: number;
+  readonly graphPathGrounding?: number;
+  readonly latencyMs?: number;
+  readonly estimatedCostUsd?: number;
 }
 
 export interface RagEvalSuiteResult {

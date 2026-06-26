@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { copyFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { CompanyDeploymentRegistry } from "../company/company-deployment-registry.js";
@@ -45,6 +47,7 @@ import {
   type ProductionIngestionConfig,
   type ProductionRagIngestInput
 } from "./production-ingestion.js";
+import type { StartupSelfTestResult } from "./startup-self-test.js";
 
 export interface ProductionRagSignalSource {
   once(signal: NodeJS.Signals, listener: () => void): this;
@@ -169,6 +172,12 @@ interface ProductionCompanySyncMetrics {
 
 const HELP_TEXT = `adaptable-rag commands:
   validate-config [--self-test true|false] [--probe-providers true|false]
+  health
+  ready [--probe-providers true|false]
+  metrics
+  doctor [--probe-providers true|false]
+  backup [--output <path>]
+  restore --input <path>
   sync --mode delta|full --tenant-id <tenant> --user-id <user> --principal-namespace-id <namespace>
   ingest --tenant-id <tenant> --user-id <user> --principal-namespace-id <namespace>
   answer --question <text> --tenant-id <tenant> --namespace-id <namespace> --user-id <user> --principal-namespace-id <namespace>
@@ -221,6 +230,77 @@ export async function runProductionRagCli(options: ProductionRagCliOptions = {})
     const app = await createCliApp(config, options);
 
     switch (parsed.command) {
+      case "health":
+        stdout(JSON.stringify(withCompanyDeployment(app.health(), companyRuntime), null, 2));
+        return 0;
+      case "ready": {
+        const selfTest = await app.selfTest({
+          probeProviders: optionalCliBooleanFlag(parsed.flags, "probe-providers") === true,
+          ...(options.now === undefined ? {} : { requestedAt: options.now() })
+        });
+        const payload = withCompanyDeployment(
+          {
+            status: selfTest.status === "passed" ? "ready" : "not_ready",
+            ready: selfTest.status === "passed",
+            health: app.health(),
+            selfTest
+          },
+          companyRuntime
+        );
+        stdout(JSON.stringify(payload, null, 2));
+        return selfTest.status === "passed" ? 0 : 1;
+      }
+      case "metrics":
+        stdout(
+          JSON.stringify(
+            withCompanyDeployment(
+              localOperationalMetrics(app, options.nowMs?.() ?? Date.now()),
+              companyRuntime
+            ),
+            null,
+            2
+          )
+        );
+        return 0;
+      case "doctor": {
+        const selfTest = await app.selfTest({
+          probeProviders: optionalCliBooleanFlag(parsed.flags, "probe-providers") === true,
+          ...(options.now === undefined ? {} : { requestedAt: options.now() })
+        });
+        const payload = withCompanyDeployment(
+          {
+            status: selfTest.status,
+            checkedAt: selfTest.checkedAt,
+            health: app.health(),
+            selfTest,
+            recommendations: doctorRecommendations(selfTest)
+          },
+          companyRuntime
+        );
+        stdout(JSON.stringify(payload, null, 2));
+        return selfTest.status === "passed" ? 0 : 1;
+      }
+      case "backup": {
+        const outputPath = firstFlag(parsed.flags, "output");
+        const result = await backupLocalStorage({
+          config,
+          cwd,
+          requestedAt: options.now?.() ?? new Date().toISOString(),
+          ...(outputPath === undefined ? {} : { outputPath })
+        });
+        stdout(JSON.stringify(withCompanyDeployment(result, companyRuntime), null, 2));
+        return result.status === "completed" ? 0 : 1;
+      }
+      case "restore": {
+        const result = await restoreLocalStorage({
+          config,
+          inputPath: requiredFlag(parsed.flags, "input"),
+          cwd,
+          requestedAt: options.now?.() ?? new Date().toISOString()
+        });
+        stdout(JSON.stringify(withCompanyDeployment(result, companyRuntime), null, 2));
+        return result.status === "completed" ? 0 : 1;
+      }
       case "validate-config":
         if (shouldRunSelfTest(parsed.flags)) {
           const selfTest = await app.selfTest({
@@ -411,6 +491,181 @@ function createCliApp(
     ...(options.nowMs === undefined ? {} : { nowMs: options.nowMs }),
     ...(options.sleep === undefined ? {} : { sleep: options.sleep })
   });
+}
+
+function withCompanyDeployment<T>(
+  payload: T,
+  runtime: ProductionCompanyDeploymentRuntime | undefined
+): T | (T & { readonly companyDeployment: unknown }) {
+  return runtime === undefined
+    ? payload
+    : {
+        ...payload,
+        companyDeployment: companyDeploymentSummary(runtime)
+      };
+}
+
+function localOperationalMetrics(
+  app: ProductionRagApp,
+  observedAtMs: number
+): {
+  readonly status: "ok";
+  readonly observedAt: string;
+  readonly uptimeMs: number;
+  readonly health: ReturnType<ProductionRagApp["health"]>;
+} {
+  return {
+    status: "ok",
+    observedAt: new Date(observedAtMs).toISOString(),
+    uptimeMs: Math.max(0, Math.round(process.uptime() * 1000)),
+    health: app.health()
+  };
+}
+
+function doctorRecommendations(selfTest: StartupSelfTestResult): readonly string[] {
+  if (selfTest.status === "passed") {
+    return [];
+  }
+
+  return selfTest.checks
+    .filter((check) => check.status === "failed")
+    .map((check) => {
+      if (check.kind === "provider_probe") {
+        return `Fix provider check "${check.id}": verify credentials, endpoint, and model name.`;
+      }
+      if (check.kind === "storage") {
+        return `Fix storage check "${check.id}": verify migrations, schema version, and backend connectivity.`;
+      }
+      return `Fix capability check "${check.id}": ${check.message}`;
+    });
+}
+
+interface LocalStorageBackupRequest {
+  readonly config: ProductionRagAppConfig;
+  readonly outputPath?: string;
+  readonly cwd: string;
+  readonly requestedAt: string;
+}
+
+interface LocalStorageRestoreRequest {
+  readonly config: ProductionRagAppConfig;
+  readonly inputPath: string;
+  readonly cwd: string;
+  readonly requestedAt: string;
+}
+
+interface LocalStorageBackupResult {
+  readonly status: "completed" | "unsupported";
+  readonly requestedAt: string;
+  readonly storageKind: ProductionRagAppConfig["storage"]["index"]["kind"];
+  readonly outputPath?: string;
+  readonly manifestPath?: string;
+  readonly sourcePath?: string;
+  readonly bytesCopied?: number;
+  readonly message?: string;
+}
+
+interface LocalStorageRestoreResult {
+  readonly status: "completed" | "unsupported";
+  readonly requestedAt: string;
+  readonly storageKind: ProductionRagAppConfig["storage"]["index"]["kind"];
+  readonly inputPath: string;
+  readonly targetPath?: string;
+  readonly bytesCopied?: number;
+  readonly message?: string;
+}
+
+async function backupLocalStorage(
+  request: LocalStorageBackupRequest
+): Promise<LocalStorageBackupResult> {
+  const index = request.config.storage.index;
+  if (index.kind !== "json_file" && index.kind !== "sqlite") {
+    return {
+      status: "unsupported",
+      requestedAt: request.requestedAt,
+      storageKind: index.kind,
+      message:
+        index.kind === "postgres"
+          ? "Use native Postgres backup tooling for postgres storage."
+          : "Memory storage has no durable local file to back up."
+    };
+  }
+
+  const sourcePath = index.path;
+  const outputPath = resolveBackupOutputPath(request.outputPath, request.cwd, request.requestedAt);
+  await mkdir(path.dirname(outputPath), { recursive: true });
+  await copyFile(sourcePath, outputPath);
+  const copied = await stat(outputPath);
+  const manifestPath = `${outputPath}.manifest.json`;
+  await writeFile(
+    manifestPath,
+    `${JSON.stringify(
+      {
+        status: "completed",
+        requestedAt: request.requestedAt,
+        storageKind: index.kind,
+        sourcePath,
+        outputPath,
+        bytesCopied: copied.size
+      },
+      null,
+      2
+    )}\n`
+  );
+
+  return {
+    status: "completed",
+    requestedAt: request.requestedAt,
+    storageKind: index.kind,
+    outputPath,
+    manifestPath,
+    sourcePath,
+    bytesCopied: copied.size
+  };
+}
+
+async function restoreLocalStorage(
+  request: LocalStorageRestoreRequest
+): Promise<LocalStorageRestoreResult> {
+  const index = request.config.storage.index;
+  const inputPath = path.resolve(request.cwd, request.inputPath);
+  if (index.kind !== "json_file" && index.kind !== "sqlite") {
+    return {
+      status: "unsupported",
+      requestedAt: request.requestedAt,
+      storageKind: index.kind,
+      inputPath,
+      message:
+        index.kind === "postgres"
+          ? "Use native Postgres restore tooling for postgres storage."
+          : "Memory storage has no durable local file to restore."
+    };
+  }
+
+  await readFile(inputPath);
+  await mkdir(path.dirname(index.path), { recursive: true });
+  await copyFile(inputPath, index.path);
+  const copied = await stat(index.path);
+  return {
+    status: "completed",
+    requestedAt: request.requestedAt,
+    storageKind: index.kind,
+    inputPath,
+    targetPath: index.path,
+    bytesCopied: copied.size
+  };
+}
+
+function resolveBackupOutputPath(
+  outputPath: string | undefined,
+  cwd: string,
+  requestedAt: string
+): string {
+  if (outputPath) {
+    return path.resolve(cwd, outputPath);
+  }
+
+  return path.resolve(cwd, ".rag", "backups", `index-${safeId(requestedAt)}.backup`);
 }
 
 async function loadCliCompanyRuntime(input: {

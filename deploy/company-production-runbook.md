@@ -69,6 +69,8 @@ Do not use `--reset-schema` against a shared or production database.
 
 The script writes `.rag/company-postgres-smoke/latest/postgres-company-smoke.json` plus nested full and delta company-smoke artifacts. Promote only when the top-level report is `passed` and both nested smoke gates pass.
 
+The CI version of this gate is `.github/workflows/company-postgres-smoke.yml`. It runs the same command against a `pgvector/pgvector:pg17` service container and uploads `.rag/company-postgres-smoke/ci` as a release artifact, so failed promotion runs keep their Postgres smoke reports.
+
 ## 4. Manual Storage Migration
 
 The automated gate applies these migrations by default. To apply them manually:

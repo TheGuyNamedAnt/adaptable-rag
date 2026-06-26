@@ -63,7 +63,8 @@ test("incident bundle escalates failed eval, replay, SLO, and delivery artifacts
           visualCitationCount: 0,
           statusCounts: { refused: 1 },
           checkCounts: { retrieval_recall: 1 },
-          retrievalModeCounts: { keyword: 1 }
+          retrievalModeCounts: { keyword: 1 },
+          retrievalQuality: retrievalQuality()
         }
       ]
     }),
@@ -162,6 +163,7 @@ function evalBenchmark(
     statusCounts: { succeeded: 1 },
     checkCounts: { retrieval_recall: 1 },
     retrievalModeCounts: { keyword: 1 },
+    retrievalQuality: retrievalQuality(),
     profiles: [
       {
         profileId: "generic-docs",
@@ -178,10 +180,27 @@ function evalBenchmark(
         visualCitationCount: 0,
         statusCounts: { succeeded: 1 },
         checkCounts: { retrieval_recall: 1 },
-        retrievalModeCounts: { keyword: 1 }
+        retrievalModeCounts: { keyword: 1 },
+        retrievalQuality: retrievalQuality()
       }
     ],
     ...overrides
+  };
+}
+
+function retrievalQuality() {
+  return {
+    recallAtK: 1,
+    mrr: 1,
+    citationPrecision: 1,
+    citationRecall: 1,
+    refusalCorrectnessRate: 1,
+    accessBoundaryCorrectnessRate: 1,
+    staleSourceRefusalRate: 0,
+    parserQualityImpact: 0,
+    graphPathGrounding: 0,
+    latencyMsP50: 0,
+    estimatedCostUsdTotal: 0
   };
 }
 

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { ContextBuildRequest } from "../context/context-types.js";
-import { breakawaySupportProfile } from "./examples/breakaway-support.profile.js";
+import { sampleSupportProfile } from "./examples/sample-support.profile.js";
 import { genericDocsProfile } from "./examples/generic-docs.profile.js";
 import { ultimateDefaultProfile } from "./presets/ultimate-default.profile.js";
 import type { RagProfile } from "./profile.js";
@@ -100,10 +100,10 @@ test("assertValidProfile returns a branded profile accepted by the registry", ()
   assert.equal(registry.getRequired(validated.id).id, validated.id);
 });
 
-test("breakaway support profile admits approved support knowledge artifacts", () => {
-  const validated = assertValidProfile(breakawaySupportProfile);
+test("sample support profile admits approved support knowledge artifacts", () => {
+  const validated = assertValidProfile(sampleSupportProfile);
   const source = validated.corpusSources.find(
-    (entry) => entry.id === "approved_knowledge_breakaway-support"
+    (entry) => entry.id === "approved_knowledge_sample-support"
   );
 
   assert.ok(source);
@@ -355,7 +355,7 @@ test("assertValidProfile throws with concrete paths for invalid profiles", () =>
 test("profile enforcement matrix covers every concrete profile field", () => {
   const enforcementPaths = new Set(PROFILE_FIELD_ENFORCEMENT.map((entry) => entry.path));
 
-  for (const profile of [genericDocsProfile, breakawaySupportProfile, ultimateDefaultProfile]) {
+  for (const profile of [genericDocsProfile, sampleSupportProfile, ultimateDefaultProfile]) {
     for (const path of leafPaths(profile)) {
       assert.equal(
         enforcementPaths.has(path),

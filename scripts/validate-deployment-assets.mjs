@@ -9,6 +9,9 @@ const files = {
   compose: read("docker-compose.yml"),
   envExample: read(".env.example"),
   packageJson: JSON.parse(read("package.json")),
+  companyPostgresSmokeWorkflow: read(
+    path.join(".github", "workflows", "company-postgres-smoke.yml")
+  ),
   deployReadme: read(path.join("deploy", "README.md")),
   localFilesExample: read(path.join("deploy", "local-files.example.json")),
   approvedKnowledgeExample: read(path.join("deploy", "approved-knowledge-artifacts.example.json")),
@@ -39,6 +42,26 @@ const files = {
   ),
   companyConnectorPackTest: read(
     path.join("templates", "company-connector-pack", "src", "company-connector-pack.test.ts")
+  ),
+  companyConnectorPackGoldenEval: read(
+    path.join(
+      "templates",
+      "company-connector-pack",
+      "profiles",
+      "company-docs",
+      "docs",
+      "golden.jsonl"
+    )
+  ),
+  companyConnectorPackAdversarialEval: read(
+    path.join(
+      "templates",
+      "company-connector-pack",
+      "profiles",
+      "company-docs",
+      "docs",
+      "adversarial.jsonl"
+    )
   )
 };
 
@@ -142,6 +165,17 @@ const checks = [
     "Package exposes company Postgres smoke script",
     files.packageJson.scripts?.["company:smoke:postgres"] ===
       "npm run build && node scripts/run-company-postgres-smoke.mjs --report-dir .rag/company-postgres-smoke/latest"
+  ),
+  check(
+    "CI includes company Postgres smoke workflow",
+    files.companyPostgresSmokeWorkflow.includes("pgvector/pgvector:pg17") &&
+      files.companyPostgresSmokeWorkflow.includes("npm run company:smoke:postgres") &&
+      files.companyPostgresSmokeWorkflow.includes("--local-provider") &&
+      files.companyPostgresSmokeWorkflow.includes("--reset-schema") &&
+      files.companyPostgresSmokeWorkflow.includes("--probe-providers") &&
+      files.companyPostgresSmokeWorkflow.includes("RAG_DATABASE_URL") &&
+      files.companyPostgresSmokeWorkflow.includes(".rag/company-postgres-smoke/ci") &&
+      files.companyPostgresSmokeWorkflow.includes("actions/upload-artifact@v4")
   ),
   check(
     "Package CI validates company deployments",
@@ -295,7 +329,8 @@ const checks = [
       files.deployReadme.includes("docker-compose.pgvector.yml") &&
       files.deployReadme.includes(".rag/company-postgres-smoke/latest") &&
       files.deployReadme.includes("postgres-company-smoke.json") &&
-      files.deployReadme.includes("--local-provider")
+      files.deployReadme.includes("--local-provider") &&
+      files.deployReadme.includes(".github/workflows/company-postgres-smoke.yml")
   ),
   check(
     "Deployment includes local-files source example",
@@ -342,6 +377,7 @@ const checks = [
       files.companyProductionRunbook.includes(
         ".rag/company-postgres-smoke/latest/postgres-company-smoke.json"
       ) &&
+      files.companyProductionRunbook.includes(".github/workflows/company-postgres-smoke.yml") &&
       files.companyProductionRunbook.includes("/ready") &&
       !containsLiveSecret(files.companyProductionRunbook)
   ),
@@ -449,7 +485,9 @@ const checks = [
     "Deployment docs mention company connector pack template",
     files.deployReadme.includes("templates/company-connector-pack") &&
       files.deployReadme.includes("permission mapper") &&
-      files.deployReadme.includes("pack contract test")
+      files.deployReadme.includes("pack contract test") &&
+      files.deployReadme.includes("starter eval JSONL") &&
+      files.deployReadme.includes("delta cursor handoff")
   ),
   check(
     "Project support connector template includes safe exporter skeleton",
@@ -469,21 +507,40 @@ const checks = [
     "Company connector pack template includes profile and validation command",
     files.companyConnectorPackReadme.includes("Company Connector Pack Template") &&
       files.companyConnectorPackReadme.includes("--run-pack-contracts") &&
+      files.companyConnectorPackReadme.includes("--min-delta-returned-records") &&
+      files.companyConnectorPackReadme.includes("profiles/company-docs/docs/*.jsonl") &&
       files.companyConnectorPackProfile.includes("export const companyProfile") &&
-      files.companyConnectorPackProfile.includes("permissionMapping")
+      files.companyConnectorPackProfile.includes("permissionMapping") &&
+      files.companyConnectorPackProfile.includes("--contract-mode delta") &&
+      files.companyConnectorPackProfile.includes("--contract-mode full")
   ),
   check(
     "Company connector pack template includes adapter pack and permission mapper",
     files.companyConnectorPackAdapterPack.includes("export const companyAdapterPack") &&
       files.companyConnectorPackAdapterPack.includes("createCompanyConnectorAdapterPack") &&
       files.companyConnectorPackAdapterPack.includes("ownerDefinedAclMapper") &&
-      files.companyConnectorPackAdapterPack.includes("sourceConnectors")
+      files.companyConnectorPackAdapterPack.includes("sourceConnectors") &&
+      files.companyConnectorPackAdapterPack.includes("corpusAdapterTests") &&
+      files.companyConnectorPackAdapterPack.includes("contentHash") &&
+      files.companyConnectorPackAdapterPack.includes("redactedAclFingerprint") &&
+      files.companyConnectorPackAdapterPack.includes("safeConnectorErrorMessage") &&
+      files.companyConnectorPackAdapterPack.includes("safeErrorCode")
   ),
   check(
     "Company connector pack template includes pack contract test",
     files.companyConnectorPackTest.includes("runCompanyPackContractTests") &&
       files.companyConnectorPackTest.includes("CompanyDeploymentRegistry") &&
-      files.companyConnectorPackTest.includes("checkedCaseCount")
+      files.companyConnectorPackTest.includes("checkedCaseCount") &&
+      files.companyConnectorPackTest.includes("cursor_after_delta_company_docs") &&
+      files.companyConnectorPackTest.includes("tombstonedMissingCount") &&
+      files.companyConnectorPackTest.includes("permissionMapperNativeAcl")
+  ),
+  check(
+    "Company connector pack template includes starter eval JSONL",
+    files.companyConnectorPackGoldenEval.includes("company-docs-policy-citation") &&
+      files.companyConnectorPackGoldenEval.includes('"sourceId":"company_docs_api"') &&
+      files.companyConnectorPackAdversarialEval.includes("company-docs-denies-restricted-scope") &&
+      files.companyConnectorPackAdversarialEval.includes('"checks":["access_boundary"]')
   )
 ];
 

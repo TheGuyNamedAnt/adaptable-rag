@@ -1,11 +1,11 @@
 import type { RagProfile } from "../profile.js";
 
-export const breakawaySupportProfile: RagProfile = {
-  id: "breakaway-support",
-  namespaceId: "breakaway-support",
-  name: "BreakAway Support RAG",
+export const sampleSupportProfile: RagProfile = {
+  id: "sample-support",
+  namespaceId: "sample-support",
+  name: "SampleApp Support RAG",
   purpose:
-    "Draft support triage reports and user-safe responses from curated BreakAway support knowledge.",
+    "Draft support triage reports and user-safe responses from curated SampleApp support knowledge.",
   outputMode: "support_triage",
   modelPolicy: {
     allowedTiers: ["fast", "balanced", "strong", "judge"],
@@ -37,7 +37,7 @@ export const breakawaySupportProfile: RagProfile = {
       tags: ["examples", "user_provided"]
     },
     {
-      id: "approved_knowledge_breakaway-support",
+      id: "approved_knowledge_sample-support",
       adapter: "approved_knowledge_artifact",
       description: "Approved support-ticket knowledge artifacts from the support bridge.",
       enabled: true,
@@ -93,7 +93,7 @@ export const breakawaySupportProfile: RagProfile = {
   refusalPolicy: {
     refuseWhenNoEvidence: true,
     refuseWhenOnlyUntrustedEvidence: true,
-    refusalMessage: "I do not have enough trusted BreakAway support evidence to answer that safely."
+    refusalMessage: "I do not have enough trusted SampleApp support evidence to answer that safely."
   },
   redactionPolicy: {
     redactBeforeLogging: true,
@@ -103,7 +103,7 @@ export const breakawaySupportProfile: RagProfile = {
   },
   outputContract: {
     mode: "support_triage",
-    schemaName: "BreakawaySupportTriage",
+    schemaName: "SampleSupportTriage",
     requireStructuredOutput: true,
     includeEvidenceSummary: true
   },
@@ -157,8 +157,8 @@ export const breakawaySupportProfile: RagProfile = {
     }
   ],
   evals: {
-    goldenSetPath: "profiles/breakaway-support/evals/golden.jsonl",
-    adversarialSetPath: "profiles/breakaway-support/evals/adversarial.jsonl",
+    goldenSetPath: "profiles/sample-support/evals/golden.jsonl",
+    adversarialSetPath: "profiles/sample-support/evals/adversarial.jsonl",
     requiredChecks: [
       "retrieval_recall",
       "citation_required",

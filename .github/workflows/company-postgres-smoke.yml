@@ -1,0 +1,74 @@
+name: Company Postgres Smoke
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/company-postgres-smoke.yml"
+      - "deploy/postgres/**"
+      - "scripts/run-company-postgres-smoke.mjs"
+      - "scripts/run-company-deployment-smoke.mjs"
+      - "src/**"
+      - "package*.json"
+      - "tsconfig.json"
+  push:
+    branches:
+      - main
+      - "codex/**"
+    paths:
+      - ".github/workflows/company-postgres-smoke.yml"
+      - "deploy/postgres/**"
+      - "scripts/run-company-postgres-smoke.mjs"
+      - "scripts/run-company-deployment-smoke.mjs"
+      - "src/**"
+      - "package*.json"
+      - "tsconfig.json"
+  workflow_dispatch:
+
+jobs:
+  company-postgres-smoke:
+    name: Company Postgres Smoke
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_DB: rag
+          POSTGRES_USER: rag
+          POSTGRES_PASSWORD: rag_ci_password
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd "pg_isready -U rag -d rag"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Run company Postgres smoke
+        env:
+          RAG_DATABASE_URL: postgres://rag:rag_ci_password@127.0.0.1:5432/rag
+        run: >
+          npm run company:smoke:postgres -- --local-provider --reset-schema --probe-providers
+          --requested-at 2026-06-26T00:00:00.000Z
+          --run-id ci_company_postgres_smoke
+          --report-dir .rag/company-postgres-smoke/ci
+
+      - name: Upload smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: company-postgres-smoke
+          path: .rag/company-postgres-smoke/ci
+          if-no-files-found: ignore

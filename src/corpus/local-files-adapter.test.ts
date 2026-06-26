@@ -9,7 +9,7 @@ import type { DocumentParser, DocumentParseResult } from "../parsing/parser.js";
 import { hashText } from "../shared/hash.js";
 import { InMemoryRagIndex } from "../indexing/in-memory-index.js";
 import { CorpusAdapterRegistry } from "./adapter-registry.js";
-import { breakawaySupportProfile } from "../profiles/examples/breakaway-support.profile.js";
+import { sampleSupportProfile } from "../profiles/examples/sample-support.profile.js";
 import { genericDocsProfile } from "../profiles/examples/generic-docs.profile.js";
 import { assertValidProfile } from "../profiles/profile-validation.js";
 import { IngestPipeline } from "../ingestion/ingest-pipeline.js";
@@ -17,9 +17,9 @@ import { FIXED_NOW, makeIndexFilter, makePrincipal } from "../test-support/fixtu
 import { LocalFilesCorpusAdapter } from "./local-files-adapter.js";
 
 const genericProfile = assertValidProfile(genericDocsProfile);
-const breakawayProfile = assertValidProfile(breakawaySupportProfile);
+const sampleProfile = assertValidProfile(sampleSupportProfile);
 const genericSource = genericProfile.corpusSources[0];
-const feedbackSource = breakawayProfile.corpusSources.find(
+const feedbackSource = sampleProfile.corpusSources.find(
   (source) => source.id === "feedback_examples"
 );
 
@@ -795,7 +795,7 @@ test("adapter output cannot promote records above a source trust floor", async (
 
     const principal = makePrincipal({
       tenantId: "tenant_1",
-      namespaceIds: [breakawayProfile.namespaceId],
+      namespaceIds: [sampleProfile.namespaceId],
       roles: ["support"],
       tags: ["examples", "user_provided"]
     });
@@ -821,7 +821,7 @@ test("adapter output cannot promote records above a source trust floor", async (
     });
 
     const result = await pipeline.ingest({
-      profile: breakawayProfile,
+      profile: sampleProfile,
       requestedBy: principal,
       sourceIds: [feedbackSource.id],
       requestedAt: FIXED_NOW

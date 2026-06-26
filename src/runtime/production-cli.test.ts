@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -186,6 +186,100 @@ test("production CLI can run startup self-tests from validate-config", async () 
   assert.equal(parsed.probeProviders, true);
   assert.equal(capturedProbeProviders, true);
   assert.equal(stdout.join("\n").includes("model-secret"), false);
+});
+
+test("production CLI exposes health ready metrics and doctor commands", async () => {
+  const commands = ["health", "ready", "metrics", "doctor"] as const;
+
+  for (const command of commands) {
+    const stdout: string[] = [];
+    const exitCode = await runProductionRagCli({
+      argv: [command],
+      env: {
+        ...CLI_TEST_ENV,
+        RAG_MODEL_API_KEY: "model-secret"
+      },
+      stdout: (line) => stdout.push(line),
+      stderr: () => undefined,
+      appFactory: (config) => fakeApp(config),
+      now: () => "2026-06-24T00:00:00.000Z",
+      nowMs: () => Date.parse("2026-06-24T00:00:00.000Z")
+    });
+    const parsed = JSON.parse(stdout[0] ?? "{}") as {
+      readonly status?: string;
+      readonly ready?: boolean;
+      readonly health?: unknown;
+      readonly selfTest?: unknown;
+    };
+
+    assert.equal(exitCode, 0);
+    if (command === "health") {
+      assert.equal(parsed.status, "ready");
+    }
+    if (command === "ready") {
+      assert.equal(parsed.status, "ready");
+      assert.equal(parsed.ready, true);
+      assert.notEqual(parsed.selfTest, undefined);
+    }
+    if (command === "metrics") {
+      assert.equal(parsed.status, "ok");
+      assert.notEqual(parsed.health, undefined);
+    }
+    if (command === "doctor") {
+      assert.equal(parsed.status, "passed");
+      assert.notEqual(parsed.selfTest, undefined);
+    }
+  }
+});
+
+test("production CLI backs up and restores local JSON index storage", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "rag-cli-backup-"));
+  const indexPath = path.join(tmp, "index.json");
+  const backupPath = path.join(tmp, "backup.json");
+  await writeFile(indexPath, JSON.stringify({ documents: [{ id: "before" }] }));
+
+  const backupStdout: string[] = [];
+  const backupExitCode = await runProductionRagCli({
+    argv: ["backup", "--output", backupPath],
+    env: {
+      ...CLI_TEST_ENV,
+      RAG_INDEX_KIND: "json_file",
+      RAG_INDEX_PATH: indexPath,
+      RAG_MODEL_API_KEY: "model-secret"
+    },
+    cwd: tmp,
+    stdout: (line) => backupStdout.push(line),
+    stderr: () => undefined,
+    appFactory: (config) => fakeApp(config),
+    now: () => "2026-06-24T00:00:00.000Z"
+  });
+
+  assert.equal(backupExitCode, 0);
+  assert.equal(JSON.parse(backupStdout[0] ?? "{}").status, "completed");
+  await writeFile(indexPath, JSON.stringify({ documents: [{ id: "after" }] }));
+
+  const restoreStdout: string[] = [];
+  const restoreExitCode = await runProductionRagCli({
+    argv: ["restore", "--input", backupPath],
+    env: {
+      ...CLI_TEST_ENV,
+      RAG_INDEX_KIND: "json_file",
+      RAG_INDEX_PATH: indexPath,
+      RAG_MODEL_API_KEY: "model-secret"
+    },
+    cwd: tmp,
+    stdout: (line) => restoreStdout.push(line),
+    stderr: () => undefined,
+    appFactory: (config) => fakeApp(config),
+    now: () => "2026-06-24T00:00:00.000Z"
+  });
+
+  assert.equal(restoreExitCode, 0);
+  assert.equal(JSON.parse(restoreStdout[0] ?? "{}").status, "completed");
+  assert.equal(
+    await readFile(indexPath, "utf8"),
+    JSON.stringify({ documents: [{ id: "before" }] })
+  );
 });
 
 test("production CLI loads a company deployment module into validate-config", async () => {

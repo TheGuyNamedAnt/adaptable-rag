@@ -83,7 +83,7 @@ test("loads paginated SaaS API items as checksummed corpus records", async () =>
       {
         sourceId: source.id,
         endpointId: "helpdesk_tickets",
-        parameters: { project: "breakaway" },
+        parameters: { project: "sample" },
         pageSize: 2,
         trustTier: "verified_partner",
         sensitivity: "confidential",
@@ -120,7 +120,7 @@ test("loads paginated SaaS API items as checksummed corpus records", async () =>
 
   assert.equal(client.requests.length, 2);
   assert.equal(client.requests[0]?.endpointId, "helpdesk_tickets");
-  assert.deepEqual(client.requests[0]?.parameters, { project: "breakaway" });
+  assert.deepEqual(client.requests[0]?.parameters, { project: "sample" });
   assert.equal(client.requests[0]?.pageSize, 2);
   assert.equal(client.requests[1]?.cursor, "page-2");
   assert.equal(loaded.warnings.length, 0);

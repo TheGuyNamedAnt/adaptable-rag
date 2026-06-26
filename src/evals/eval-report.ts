@@ -1,4 +1,10 @@
-import type { RagEvalCaseResult, RagEvalRunSummary, RagEvalSuiteResult } from "./eval-types.js";
+import type { RegressionDashboardArtifact } from "./retrieval-benchmark-runner.js";
+import type {
+  RagEvalCaseMetrics,
+  RagEvalCaseResult,
+  RagEvalRunSummary,
+  RagEvalSuiteResult
+} from "./eval-types.js";
 
 export interface RagEvalProfileBenchmark {
   readonly profileId: string;
@@ -16,6 +22,7 @@ export interface RagEvalProfileBenchmark {
   readonly statusCounts: Readonly<Record<string, number>>;
   readonly checkCounts: Readonly<Record<string, number>>;
   readonly retrievalModeCounts: Readonly<Record<string, number>>;
+  readonly retrievalQuality?: RagEvalRetrievalQualityMetrics;
 }
 
 export interface RagEvalBenchmarkSnapshot {
@@ -32,7 +39,22 @@ export interface RagEvalBenchmarkSnapshot {
   readonly statusCounts: Readonly<Record<string, number>>;
   readonly checkCounts: Readonly<Record<string, number>>;
   readonly retrievalModeCounts: Readonly<Record<string, number>>;
+  readonly retrievalQuality?: RagEvalRetrievalQualityMetrics;
   readonly profiles: readonly RagEvalProfileBenchmark[];
+}
+
+export interface RagEvalRetrievalQualityMetrics {
+  readonly recallAtK: number;
+  readonly mrr: number;
+  readonly citationPrecision: number;
+  readonly citationRecall: number;
+  readonly refusalCorrectnessRate: number;
+  readonly accessBoundaryCorrectnessRate: number;
+  readonly staleSourceRefusalRate: number;
+  readonly parserQualityImpact: number;
+  readonly graphPathGrounding: number;
+  readonly latencyMsP50: number;
+  readonly estimatedCostUsdTotal: number;
 }
 
 export interface RagEvalRegressionOptions {
@@ -88,7 +110,20 @@ export function buildEvalBenchmarkSnapshot(
     statusCounts: countBy(cases.map((evalCase) => evalCase.status ?? "not_run")),
     checkCounts: countBy(cases.flatMap((evalCase) => evalCase.checks)),
     retrievalModeCounts: countBy(cases.map((evalCase) => evalCase.retrievalMode ?? "not_run")),
+    retrievalQuality: retrievalQualityMetrics(cases),
     profiles
+  };
+}
+
+export function buildRegressionDashboardArtifact(
+  summary: RagEvalRunSummary,
+  generatedAt: string = new Date().toISOString()
+): RegressionDashboardArtifact {
+  const quality = retrievalQualityMetrics(summary.suites.flatMap((suite) => suite.cases));
+  return {
+    schemaVersion: 1,
+    generatedAt,
+    ...quality
   };
 }
 
@@ -252,7 +287,10 @@ function profileBenchmark(suite: RagEvalSuiteResult): RagEvalProfileBenchmark {
     visualCitationCount: sum(suite.cases.map((evalCase) => evalCase.visualCitationCount ?? 0)),
     statusCounts: countBy(suite.cases.map((evalCase) => evalCase.status ?? "not_run")),
     checkCounts: countBy(suite.cases.flatMap((evalCase) => evalCase.checks)),
-    retrievalModeCounts: countBy(suite.cases.map((evalCase) => evalCase.retrievalMode ?? "not_run"))
+    retrievalModeCounts: countBy(
+      suite.cases.map((evalCase) => evalCase.retrievalMode ?? "not_run")
+    ),
+    retrievalQuality: retrievalQualityMetrics(suite.cases)
   };
 }
 
@@ -386,6 +424,68 @@ function caseRow(suite: RagEvalSuiteResult, evalCase: RagEvalCaseResult): string
 
 function metric(label: string, value: number | string): string {
   return `<div class="metric"><span>${escapeHtml(label)}</span><strong>${escapeHtml(String(value))}</strong></div>`;
+}
+
+function retrievalQualityMetrics(
+  cases: readonly RagEvalCaseResult[]
+): RagEvalRetrievalQualityMetrics {
+  const metrics = cases.flatMap((evalCase) => (evalCase.metrics ? [evalCase.metrics] : []));
+  return {
+    recallAtK: averageMetric(metrics, "recallAtK"),
+    mrr: averageMetric(metrics, "mrr"),
+    citationPrecision: averageMetric(metrics, "citationPrecision"),
+    citationRecall: averageMetric(metrics, "citationRecall"),
+    refusalCorrectnessRate: booleanRate(metrics, "refusalCorrectness"),
+    accessBoundaryCorrectnessRate: booleanRate(metrics, "accessBoundaryCorrectness"),
+    staleSourceRefusalRate: booleanRate(metrics, "staleSourceRefusal"),
+    parserQualityImpact: averageMetric(metrics, "parserQualityImpact"),
+    graphPathGrounding: averageMetric(metrics, "graphPathGrounding"),
+    latencyMsP50: percentileMetric(metrics, "latencyMs", 0.5),
+    estimatedCostUsdTotal: round(sum(metrics.map((metric) => metric.estimatedCostUsd ?? 0)))
+  };
+}
+
+function averageMetric(
+  metrics: readonly RagEvalCaseMetrics[],
+  key: keyof RagEvalCaseMetrics
+): number {
+  const values = numericMetricValues(metrics, key);
+  return values.length === 0 ? 0 : round(sum(values) / values.length);
+}
+
+function percentileMetric(
+  metrics: readonly RagEvalCaseMetrics[],
+  key: keyof RagEvalCaseMetrics,
+  percentile: number
+): number {
+  const values = [...numericMetricValues(metrics, key)].sort((first, second) => first - second);
+  if (values.length === 0) {
+    return 0;
+  }
+  const index = Math.min(
+    values.length - 1,
+    Math.max(0, Math.floor((values.length - 1) * percentile))
+  );
+  return values[index] ?? 0;
+}
+
+function numericMetricValues(
+  metrics: readonly RagEvalCaseMetrics[],
+  key: keyof RagEvalCaseMetrics
+): readonly number[] {
+  return metrics
+    .map((metric) => metric[key])
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+}
+
+function booleanRate(
+  metrics: readonly RagEvalCaseMetrics[],
+  key: keyof RagEvalCaseMetrics
+): number {
+  const values = metrics
+    .map((metric) => metric[key])
+    .filter((value): value is boolean => typeof value === "boolean");
+  return values.length === 0 ? 0 : rate(values.filter(Boolean).length, values.length);
 }
 
 function numericDelta(

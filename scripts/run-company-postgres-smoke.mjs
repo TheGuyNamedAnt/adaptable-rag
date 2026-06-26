@@ -365,9 +365,43 @@ function postgresSmokeEnv(input) {
       RAG_APP_RERANK_MODE: "disabled",
       RAG_APP_VISUAL_EMBEDDING_MODE: "disabled"
     });
+
+    applyLocalProviderHttpAuth(env);
   }
 
   return env;
+}
+
+function applyLocalProviderHttpAuth(env) {
+  if (env.RAG_HTTP_AUTH_MODE === "disabled" || hasHttpAuthSecret(env)) {
+    return;
+  }
+
+  const tokenEnvName = env.RAG_HTTP_AUTH_TOKEN_ENV ?? "RAG_HTTP_AUTH_TOKEN";
+  env.RAG_HTTP_AUTH_MODE = "required";
+  env.RAG_HTTP_AUTH_HEADER = env.RAG_HTTP_AUTH_HEADER ?? "authorization";
+  env.RAG_HTTP_AUTH_TOKEN_ENV = tokenEnvName;
+  env[tokenEnvName] = "postgres-company-smoke-local-provider-secret";
+}
+
+function hasHttpAuthSecret(env) {
+  if (nonEmptyString(env.RAG_HTTP_AUTH_TOKEN) || nonEmptyString(env.RAG_HTTP_AUTH_TOKEN_SHA256S)) {
+    return true;
+  }
+
+  const tokenEnvName = env.RAG_HTTP_AUTH_TOKEN_ENV;
+  if (nonEmptyString(tokenEnvName) && nonEmptyString(env[tokenEnvName])) {
+    return true;
+  }
+
+  if (!nonEmptyString(env.RAG_HTTP_AUTH_TOKEN_ENVS)) {
+    return false;
+  }
+
+  return env.RAG_HTTP_AUTH_TOKEN_ENVS.split(",")
+    .map((name) => name.trim())
+    .filter(Boolean)
+    .every((name) => nonEmptyString(env[name]));
 }
 
 async function migrationGate(input) {
@@ -757,6 +791,10 @@ function positiveInteger(value, label) {
     throw new Error(`${label} must be a positive integer.`);
   }
   return parsed;
+}
+
+function nonEmptyString(value) {
+  return typeof value === "string" && value.trim().length > 0;
 }
 
 function safeSqlIdentifier(value, label) {

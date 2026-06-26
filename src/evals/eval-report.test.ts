@@ -4,6 +4,7 @@ import test from "node:test";
 import type { RagEvalRunSummary } from "./eval-types.js";
 import {
   buildEvalBenchmarkSnapshot,
+  buildRegressionDashboardArtifact,
   compareEvalBenchmarks,
   renderEvalHtmlReport
 } from "./eval-report.js";
@@ -30,6 +31,21 @@ test("builds deterministic eval benchmark metrics from a run summary", () => {
     not_run: 1,
     visual: 1
   });
+  assert.equal(snapshot.retrievalQuality?.recallAtK, 0.75);
+  assert.equal(snapshot.retrievalQuality?.mrr, 1);
+  assert.equal(snapshot.retrievalQuality?.citationPrecision, 0.666667);
+  assert.equal(snapshot.retrievalQuality?.citationRecall, 0.5);
+  assert.equal(snapshot.retrievalQuality?.accessBoundaryCorrectnessRate, 1);
+});
+
+test("builds regression dashboard artifact from case metrics", () => {
+  const dashboard = buildRegressionDashboardArtifact(summaryFixture(), "2026-06-24T00:00:00.000Z");
+
+  assert.equal(dashboard.schemaVersion, 1);
+  assert.equal(dashboard.recallAtK, 0.75);
+  assert.equal(dashboard.citationRecall, 0.5);
+  assert.equal(dashboard.accessBoundaryCorrectnessRate, 1);
+  assert.equal(dashboard.estimatedCostUsdTotal, 0.003);
 });
 
 test("compares eval benchmarks and fails on quality regressions", () => {
@@ -119,7 +135,17 @@ function summaryFixture(): RagEvalRunSummary {
             retrievedDocumentIds: ["doc_policy"],
             finalCitationCount: 2,
             visualCitationCount: 0,
-            traceId: "trace_keyword"
+            traceId: "trace_keyword",
+            metrics: {
+              recallAtK: 1,
+              mrr: 1,
+              citationPrecision: 1,
+              citationRecall: 1,
+              refusalCorrectness: true,
+              accessBoundaryCorrectness: true,
+              latencyMs: 10,
+              estimatedCostUsd: 0.001
+            }
           },
           {
             id: "visual-case",
@@ -133,7 +159,18 @@ function summaryFixture(): RagEvalRunSummary {
             retrievedDocumentIds: ["doc_visual"],
             finalCitationCount: 1,
             visualCitationCount: 1,
-            traceId: "trace_visual"
+            traceId: "trace_visual",
+            metrics: {
+              recallAtK: 0.5,
+              mrr: 1,
+              citationPrecision: 1,
+              citationRecall: 0.5,
+              refusalCorrectness: true,
+              accessBoundaryCorrectness: true,
+              graphPathGrounding: 0,
+              latencyMs: 20,
+              estimatedCostUsd: 0.002
+            }
           },
           {
             id: "denied-case",
@@ -142,7 +179,14 @@ function summaryFixture(): RagEvalRunSummary {
             passed: false,
             failures: ["<script>alert(1)</script>"],
             retrievedDocumentIds: [],
-            finalCitationCount: 0
+            finalCitationCount: 0,
+            metrics: {
+              refusalCorrectness: true,
+              accessBoundaryCorrectness: true,
+              citationPrecision: 0,
+              citationRecall: 0,
+              staleSourceRefusal: true
+            }
           }
         ]
       }

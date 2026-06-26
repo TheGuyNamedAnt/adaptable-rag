@@ -57,6 +57,7 @@ import type {
 import { runEvalExtractionQuality } from "./extraction-quality.js";
 import { RUNTIME_EVAL_CHECKS } from "./eval-types.js";
 import { checkRelationshipClaimGrounding } from "./relationship-claim-grounding.js";
+import { RetrievalBenchmarkRunner } from "./retrieval-benchmark-runner.js";
 
 const DEFAULT_EVAL_NOW = "2026-06-23T12:00:00.000Z";
 
@@ -370,6 +371,7 @@ async function runEvalCase(
 
     failures.push(...assertExpectations(runtimeProfile, evalCase, answer));
     failures.push(...assertCheckSpecificExpectations(runtimeProfile, evalCase, answer));
+    const metrics = new RetrievalBenchmarkRunner().evaluate(evalCase, answer);
 
     return {
       id: evalCase.id,
@@ -386,7 +388,8 @@ async function runEvalCase(
       finalCitationCount: answer.trace.finalCitations.length,
       ...(hasContext(answer) ? { visualCitationCount: visualCitationCount(answer) } : {}),
       traceId: answer.trace.traceId,
-      trace: answer.trace
+      trace: answer.trace,
+      metrics
     };
   } catch (error) {
     failures.push(error instanceof Error ? error.message : "Unknown eval runner error.");

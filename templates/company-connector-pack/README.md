@@ -22,27 +22,71 @@ It must not emit raw source bodies into ledgers, raw native ACL payloads into tr
 - `src/company-profile.ts`: copyable company profile and use-case/source declarations
 - `src/company-adapter-pack.ts`: copyable adapter pack with corpus adapter, source connector, and permission mapper
 - `src/company-connector-pack.test.ts`: contract test that runs the company connector gate
+- `profiles/company-docs/docs/*.jsonl`: starter golden and adversarial eval cases matching the profile paths
 
 ## Company Steps
 
 1. Copy this folder into the company deployment repo.
 2. Replace `companyDocsClient` with the real source API/database client.
 3. Replace `CompanyDocsItem` and `CompanyDocsNativeAcl` with safe projections from the source system.
-4. Keep raw source credentials, raw ACL payloads, and principal claims out of returned records and warnings.
-5. Update `companyProfile` ids, namespace, eval paths, corpus source ids, and connector ids.
+4. Keep raw source credentials, raw ACL payloads, and principal claims out of returned records, warnings, ledgers, and traces.
+5. Update `companyProfile` ids, namespace, eval paths, corpus source ids, connector ids, and principal roles/tags.
 6. Keep `createCompanyConnectorAdapterPack()` as the adapter-pack export used by deployment validation.
-7. Run the contract test locally, then wire the packaged validator into CI:
+7. Keep the contract fixture behavior intact while replacing the client:
+   - `listDocuments()` should page through current approved records for adapter contract tests.
+   - `listChangedDocuments({ mode: "delta" })` should return at least one changed record and a cursor.
+   - `listChangedDocuments({ mode: "full" })` should use the prior cursor when provided and return `complete: true` for a full snapshot.
+   - Delete events must include `recordId`; missing records in a complete full sync become tombstones through the generic sync runner.
+   - `sourceAcl` must be a redacted fingerprint only. Never return raw native ACL blobs.
+8. Run the contract test locally, then wire the packaged validator into CI:
 
 ```bash
 npm run company:validate -- \
-	  --module dist/company/company-profile.js \
-	  --export companyProfile \
-	  --adapter-pack-export companyAdapterPack \
-	  --run-pack-contracts \
-	  --use-case docs \
+  --module dist/company/company-profile.js \
+  --export companyProfile \
+  --adapter-pack-export companyAdapterPack \
+  --run-pack-contracts \
+  --use-case docs \
+  --contract-mode delta \
+  --contract-mode full \
+  --min-delta-returned-records 1 \
+  --disallow-connector-warnings \
   --principal-role docs_reader \
   --principal-tag trusted_internal \
   --report-dir .rag/company/company-docs
 ```
 
-The connector pack does not run the RAG HTTP service, choose model providers, or own Postgres migrations. It only supplies company-specific source integration code that must pass the generic deployment gates before production use.
+## ACL Mapping
+
+The example `companyDocsPermissionMapper` maps safe native ACL projections into `AccessScope`. A production mapper should preserve the selected tenant and namespace, then add at least one role, tag, team, or user boundary. If a source item belongs to a different tenant or namespace, let the contract fail instead of silently widening access.
+
+The contract fixture passes `permissionMapperNativeAcl` so the mapper is tested directly, not only through records emitted by the connector.
+
+## Eval Pack
+
+The included JSONL files are intentionally tiny. Keep them in the copied pack, then replace the corpus text with company-owned safe fixtures:
+
+- `golden.jsonl` should prove the connector can retrieve and cite approved source material.
+- `adversarial.jsonl` should prove denied ACL scopes, unsupported questions, and prompt-injection content are refused.
+
+## Postgres Promotion
+
+This pack does not run the RAG HTTP service, choose model providers, or own Postgres migrations. It supplies company-specific source integration code that must pass the generic deployment gates before production use.
+
+After the pack contract passes, run the serious storage gate from the deployment repo:
+
+```bash
+export RAG_DATABASE_URL=postgres://rag:rag_dev_password@127.0.0.1:54329/rag
+npm run company:smoke:postgres -- \
+  --module dist/company/company-profile.js \
+  --export companyProfile \
+  --adapter-pack-export companyAdapterPack \
+  --use-case docs \
+  --source-id company_docs_api \
+  --local-provider \
+  --reset-schema \
+  --probe-providers \
+  --report-dir .rag/company-postgres-smoke/company-docs
+```
+
+Use `--local-provider` only for deterministic storage validation. For a real deployment, omit it and pass the production env file with live provider settings.

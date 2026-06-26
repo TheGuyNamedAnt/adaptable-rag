@@ -149,7 +149,7 @@ export type {
   ProfileFieldEnforcementStatus
 } from "./profiles/profile-enforcement.js";
 export { genericDocsProfile } from "./profiles/examples/generic-docs.profile.js";
-export { breakawaySupportProfile } from "./profiles/examples/breakaway-support.profile.js";
+export { sampleSupportProfile } from "./profiles/examples/sample-support.profile.js";
 export { acmeSupportCompanyProfile } from "./company/examples/acme-support.company.js";
 export { ultimateDefaultProfile } from "./profiles/presets/ultimate-default.profile.js";
 export {
@@ -1597,6 +1597,7 @@ export type {
   EvalRetrievalMode,
   LoadedRagEvalCase,
   RagEvalCase,
+  RagEvalCaseMetrics,
   RagEvalCaseResult,
   RagEvalCheck,
   RagEvalExtractionFixture,
@@ -1619,17 +1620,25 @@ export type {
 export { RUNTIME_EVAL_CHECKS } from "./evals/eval-types.js";
 export {
   buildEvalBenchmarkSnapshot,
+  buildRegressionDashboardArtifact,
   compareEvalBenchmarks,
   renderEvalHtmlReport
 } from "./evals/eval-report.js";
 export type {
   RagEvalBenchmarkSnapshot,
   RagEvalProfileBenchmark,
+  RagEvalRetrievalQualityMetrics,
   RagEvalRegressionDelta,
   RagEvalRegressionOptions,
   RagEvalRegressionResult,
   RagEvalReportBundle
 } from "./evals/eval-report.js";
+export { RetrievalBenchmarkRunner } from "./evals/retrieval-benchmark-runner.js";
+export type {
+  AccessBoundaryEval,
+  CitationQualityReport,
+  RegressionDashboardArtifact
+} from "./evals/retrieval-benchmark-runner.js";
 export {
   buildEvalTraceReplayReport,
   EVAL_TRACE_REPLAY_SCHEMA_VERSION,
@@ -1878,6 +1887,36 @@ export type {
   TraceEvent,
   TraceEventKind
 } from "./observability/trace.js";
+export {
+  inspect,
+  inspectCitation,
+  inspectEvalFailure,
+  inspectIngestionRun,
+  inspectRetrieval,
+  inspectSourceHealth,
+  inspectTrace
+} from "./inspect/index.js";
+export type {
+  InspectCitationChain,
+  InspectCitationRequest,
+  InspectCitationResult,
+  InspectContextRejection,
+  InspectEvalFailureCase,
+  InspectEvalFailureRequest,
+  InspectEvalFailureResult,
+  InspectIngestionCounts,
+  InspectIngestionRunRequest,
+  InspectIngestionRunResult,
+  InspectRetrievalCandidate,
+  InspectRetrievalRejection,
+  InspectRetrievalResult,
+  InspectSourceHealth,
+  InspectSourceHealthRequest,
+  InspectSourceHealthResult,
+  InspectSourceHealthStatus,
+  InspectTraceEvent,
+  InspectTraceResult
+} from "./inspect/index.js";
 export {
   isImplementedRerankMode,
   isImplementedRetrievalMode,

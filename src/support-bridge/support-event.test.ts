@@ -125,7 +125,7 @@ function knownIssueCandidateEvent(
     sourceTicketId: "ticket_123",
     runId: "run_123",
     traceId: "trace_123",
-    profileId: "breakaway-support",
+    profileId: "sample-support",
     eventType: "known_issue_candidate_created",
     occurredAt: GENERATED_AT,
     actor: "anton",

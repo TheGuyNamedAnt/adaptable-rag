@@ -44,7 +44,7 @@ import {
   PostgresSourceSyncLedgerStore,
   type SourceSyncLedgerStore
 } from "../sync/sync-ledger.js";
-import { breakawaySupportProfile } from "../profiles/examples/breakaway-support.profile.js";
+import { sampleSupportProfile } from "../profiles/examples/sample-support.profile.js";
 import { genericDocsProfile } from "../profiles/examples/generic-docs.profile.js";
 import { ultimateDefaultProfile } from "../profiles/presets/ultimate-default.profile.js";
 import type { RagProfile } from "../profiles/profile.js";
@@ -65,7 +65,7 @@ import {
   type StartupSelfTestResult
 } from "./startup-self-test.js";
 
-export type ProductionProfilePresetId = "generic-docs" | "breakaway-support" | "ultimate-default";
+export type ProductionProfilePresetId = "generic-docs" | "sample-support" | "ultimate-default";
 
 export type ProductionIndexStorageConfig =
   | {
@@ -1451,8 +1451,8 @@ function profilePreset(preset: ProductionProfilePresetId): RagProfile {
   switch (preset) {
     case "generic-docs":
       return cloneProfile(genericDocsProfile);
-    case "breakaway-support":
-      return cloneProfile(breakawaySupportProfile);
+    case "sample-support":
+      return cloneProfile(sampleSupportProfile);
     case "ultimate-default":
       return cloneProfile(ultimateDefaultProfile);
   }

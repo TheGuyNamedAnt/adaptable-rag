@@ -75,8 +75,8 @@
       }
     },
     {
-      "profileId": "breakaway-support",
-      "namespaceId": "breakaway-support",
+      "profileId": "sample-support",
+      "namespaceId": "sample-support",
       "passed": true,
       "caseCount": 4,
       "passedCaseCount": 4,

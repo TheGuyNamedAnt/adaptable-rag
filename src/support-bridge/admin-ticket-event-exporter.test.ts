@@ -8,8 +8,8 @@ const GENERATED_AT = "2026-06-24T00:00:00.000Z";
 test("admin support exporter emits ticket, review, route, and engineering events", () => {
   const result = exportAdminSupportTicketEvents({
     generatedAt: GENERATED_AT,
-    defaultProfileId: "breakaway-support",
-    defaultNamespaceId: "breakaway-support",
+    defaultProfileId: "sample-support",
+    defaultNamespaceId: "sample-support",
     triageReports: [
       {
         runId: "run_1",
@@ -97,7 +97,7 @@ test("admin support exporter emits ticket, review, route, and engineering events
   assert.equal(result.metrics.eventCount, 6);
   assert.equal(result.metrics.proposedKnowledgeActionCount, 5);
   assert.equal(
-    result.events.every((event) => event.namespaceId === "breakaway-support"),
+    result.events.every((event) => event.namespaceId === "sample-support"),
     true
   );
   assert.deepEqual(

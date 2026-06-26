@@ -15,11 +15,12 @@ const options = parseArgs(process.argv.slice(2));
 try {
   const moduleUrl = resolveModuleUrl(options.modulePath);
   const moduleExports = await import(moduleUrl.href);
-  const company = moduleExports[options.exportName];
+  const deploymentInput = deploymentInputFromExport(moduleExports[options.exportName], options);
+  const company = deploymentInput.company;
 
   if (!company || typeof company !== "object") {
     throw new Error(
-      `Export "${options.exportName}" from ${options.modulePath} is not a company profile object.`
+      `Export "${options.exportName}" from ${options.modulePath} is not a company profile or deployment object.`
     );
   }
 
@@ -52,6 +53,7 @@ try {
       ? await runPackContractGate({
           moduleExports,
           company,
+          deploymentInput,
           options
         })
       : {
@@ -79,6 +81,7 @@ try {
       ? await runConnectorContractGate({
           moduleExports,
           company,
+          deploymentInput,
           options
         })
       : {
@@ -220,8 +223,9 @@ function parseArgs(args) {
 
 async function runPackContractGate(input) {
   try {
-    const { adapterPacks, exportNames } = adapterPacksFromModule(
+    const { adapterPacks, exportNames } = adapterPacksForContracts(
       input.moduleExports,
+      input.deploymentInput,
       input.options
     );
     const registry = new CompanyDeploymentRegistry([
@@ -309,8 +313,9 @@ async function runPackContractGate(input) {
 
 async function runConnectorContractGate(input) {
   try {
-    const { adapterPacks, exportNames } = adapterPacksFromModule(
+    const { adapterPacks, exportNames } = adapterPacksForContracts(
       input.moduleExports,
+      input.deploymentInput,
       input.options
     );
     const registry = new CompanyDeploymentRegistry([
@@ -389,6 +394,46 @@ async function runConnectorContractGate(input) {
       error: safeError(error)
     };
   }
+}
+
+function deploymentInputFromExport(value, options) {
+  if (isDeploymentRegistration(value)) {
+    return {
+      company: value.company,
+      adapterPacks: Array.isArray(value.adapterPacks) ? value.adapterPacks : [],
+      deploymentExportName: options.exportName
+    };
+  }
+
+  return {
+    company: value,
+    adapterPacks: [],
+    deploymentExportName: undefined
+  };
+}
+
+function isDeploymentRegistration(value) {
+  return (
+    value !== undefined &&
+    value !== null &&
+    typeof value === "object" &&
+    "company" in value &&
+    value.company !== undefined
+  );
+}
+
+function adapterPacksForContracts(moduleExports, deploymentInput, options) {
+  if (options.adapterPackExportNames.length === 0 && deploymentInput.adapterPacks.length > 0) {
+    return {
+      adapterPacks: deploymentInput.adapterPacks,
+      exportNames:
+        deploymentInput.deploymentExportName === undefined
+          ? []
+          : [`${deploymentInput.deploymentExportName}.adapterPacks`]
+    };
+  }
+
+  return adapterPacksFromModule(moduleExports, options);
 }
 
 function adapterPacksFromModule(moduleExports, options) {
