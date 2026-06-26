@@ -1,0 +1,81 @@
+{
+  "name": "adaptable-rag",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A configurable profile-driven RAG core with provenance, access boundaries, traces, and evals.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "adaptable-rag": "dist/runtime/production-cli.js"
+  },
+  "packageManager": "npm@10.9.2",
+  "engines": {
+    "node": ">=24 <27",
+    "npm": ">=10"
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "build": "node scripts/clean-dist.mjs && tsc -p tsconfig.json",
+    "start": "node dist/runtime/production-cli.js",
+    "serve": "node dist/runtime/production-cli.js serve",
+    "deployment:check": "node scripts/validate-deployment-assets.mjs",
+    "company:validate": "npm run build && node scripts/validate-company-deployment.mjs",
+    "company:smoke": "npm run build && node scripts/run-company-deployment-smoke.mjs --report-dir .rag/company-smoke/latest",
+    "company:smoke:postgres": "npm run build && node scripts/run-company-postgres-smoke.mjs --report-dir .rag/company-postgres-smoke/latest",
+    "test": "npm run build && node scripts/run-tests-with-guard.mjs",
+    "test:coverage": "npm run build && node scripts/run-tests-with-guard.mjs --coverage --coverage-lines=80 --coverage-branches=75 --coverage-functions=85",
+    "evals": "npm run build && node scripts/run-evals.mjs --baseline profiles/eval-baseline.json --report-dir .rag/eval-runs/latest",
+    "evals:update-baseline": "npm run build && node scripts/run-evals.mjs --update-baseline profiles/eval-baseline.json --report-dir .rag/eval-runs/latest",
+    "replay:eval": "npm run build && node scripts/run-trace-replay.mjs --eval-summary .rag/eval-runs/latest/summary.json --report-dir .rag/trace-replay/latest",
+    "slo:check": "npm run build && node scripts/run-slo-check.mjs --eval-benchmark .rag/eval-runs/latest/benchmark.json --trace-replay .rag/trace-replay/latest/replay.json --report-dir .rag/slo/latest",
+    "alerts:deliver": "npm run build && node scripts/deliver-alerts.mjs --alerts .rag/slo/latest/alerts.json --report-dir .rag/alert-delivery/latest --mode dry-run",
+    "incident:bundle": "npm run build && node scripts/build-incident-bundle.mjs --eval-benchmark .rag/eval-runs/latest/benchmark.json --eval-summary .rag/eval-runs/latest/summary.json --trace-replay .rag/trace-replay/latest/replay.json --slo .rag/slo/latest/slo.json --alert-delivery .rag/alert-delivery/latest/delivery.json --report-dir .rag/incidents/latest",
+    "review:queue": "npm run build && node scripts/build-review-queue.mjs --eval-summary .rag/eval-runs/latest/summary.json --incident .rag/incidents/latest/incident.json --report-dir .rag/human-review/latest",
+    "review:ledger": "npm run build && node scripts/build-review-ledger.mjs --queue .rag/human-review/latest/queue.json --report-dir .rag/review-ledger/latest",
+    "review:sync": "npm run build && node scripts/sync-review-tickets.mjs --queue .rag/human-review/latest/queue.json --ledger .rag/review-ledger/latest/ledger.json --report-dir .rag/review-sync/latest --mode dry-run",
+    "review:reconcile": "npm run build && node scripts/reconcile-review-tickets.mjs --tickets .rag/review-sync/latest/tickets.json --sync .rag/review-sync/latest/sync.json --report-dir .rag/review-reconciliation/latest",
+    "support:export:validate": "npm run build && node scripts/validate-support-event-export.mjs --events .rag/support-knowledge/events.jsonl --report-dir .rag/support-export/latest",
+    "support:knowledge": "npm run build && node scripts/run-support-knowledge-flow.mjs --events .rag/support-knowledge/events.jsonl --report-dir .rag/support-knowledge/latest",
+    "support:knowledge:auto": "npm run build && npm run support:knowledge:auto:run",
+    "support:knowledge:auto:run": "node scripts/run-support-knowledge-flow.mjs --events .rag/support-knowledge/events.jsonl --report-dir .rag/support-knowledge/latest --auto-approve-safe-ticket-updates --approval-ledger-path approval-ledger.json --source-path-prefix approved-knowledge --access-scope-json '{\"namespaceId\":\"breakaway-support\",\"roles\":[\"support\"],\"tags\":[\"auto-ticket-sync\",\"known-issues\"]}' --metadata-json '{\"syncMode\":\"auto_ticket_sync\"}'",
+    "support:ingest:auto": "npm run build && npm run support:ingest:auto:run",
+    "support:ingest:auto:run": "RAG_APP_PROFILE_PRESET=breakaway-support RAG_APPROVED_KNOWLEDGE_ARTIFACTS_PATH=.rag/support-knowledge/latest/approved-knowledge.sources.json RAG_INDEX_KIND=json_file RAG_INDEX_PATH=.rag/support-knowledge/index.json RAG_INDEX_PRETTY=true RAG_MODEL_PROVIDER=json-chat RAG_MODEL_MODEL_NAME=ingest-placeholder RAG_MODEL_ENDPOINT=https://provider.example.invalid/v1/chat RAG_MODEL_API_KEY=ingest-placeholder RAG_RERANK_PROVIDER=json-chat RAG_RERANK_MODEL_NAME=rerank-placeholder RAG_RERANK_ENDPOINT=https://provider.example.invalid/v1/rerank RAG_RERANK_API_KEY=rerank-placeholder RAG_APP_EMBEDDING_MODE=disabled RAG_APP_VISUAL_EMBEDDING_MODE=disabled RAG_APP_GROUNDING_JUDGE_MODE=disabled RAG_HTTP_AUTH_MODE=disabled RAG_HTTP_LOG_MODE=disabled node dist/runtime/production-cli.js ingest --tenant-id breakaway --namespace-id breakaway-support --user-id rag_support_sync --principal-namespace-id breakaway-support --role support --tag auto-ticket-sync --tag known-issues --source-id approved_knowledge_breakaway-support --overwrite replace --run-id support_knowledge_auto_ingest",
+    "support:drill": "npm run build && node scripts/run-support-operator-drill.mjs --events .rag/support-knowledge/events.jsonl --report-dir .rag/support-drill/latest",
+    "parser-quality:report": "npm run build && node scripts/run-parser-quality-report.mjs",
+    "excel:test-corpus": "node scripts/prepare-excel-test-corpus.mjs",
+    "excel:parser-quality": "npm run build && npm run excel:test-corpus && node scripts/run-parser-quality-report.mjs --sources .rag/excel-parser-corpus/local-files.sources.json --report-dir .rag/excel-parser-corpus/parser-quality",
+    "excel:validate": "node scripts/validate-excel-parser-corpus.mjs",
+    "excel:stress": "npm run excel:test-corpus && node scripts/run-parser-quality-report.mjs --sources .rag/excel-parser-corpus/local-files.sources.json --report-dir .rag/excel-parser-corpus/parser-quality && npm run excel:validate",
+    "excel:visual-retrieval-smoke": "npm run build && npm run excel:test-corpus && node scripts/run-excel-visual-retrieval-smoke.mjs",
+    "sec:test-corpus": "node scripts/prepare-sec-test-corpus.mjs",
+    "sec:retrieval-smoke": "npm run build && node scripts/run-sec-retrieval-smoke.mjs",
+    "sec:deep-eval": "npm run build && node scripts/run-sec-corpus-deep-eval.mjs",
+    "smoke:providers": "npm run build && node scripts/run-provider-smoke.mjs --report-dir .rag/provider-smoke/latest",
+    "graph:benchmark": "npm run build && node scripts/run-graph-benchmark.mjs --report-dir .rag/graph-benchmark/latest",
+    "graph:import": "npm run build && node scripts/run-graph-import.mjs --report-dir .rag/graph-import/latest",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "ci": "npm run check && npm run lint && npm run format:check && npm run deployment:check && npm run company:validate && npm run company:smoke && npm run test:coverage && npm run evals && npm run replay:eval && npm run slo:check && npm run alerts:deliver && npm run incident:bundle && npm run review:queue && npm run review:ledger && npm run review:sync && npm run review:reconcile && npm audit --audit-level=moderate"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.4",
+    "@types/node": "^26.0.0",
+    "@types/pg": "^8.20.0",
+    "eslint": "^9.39.4",
+    "prettier": "^3.8.4",
+    "typescript": "^5.5.0",
+    "typescript-eslint": "^8.62.0"
+  },
+  "dependencies": {
+    "pg": "^8.22.0"
+  }
+}

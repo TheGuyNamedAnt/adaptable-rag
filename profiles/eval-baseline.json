@@ -1,0 +1,182 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-06-26T02:14:29.013Z",
+  "passed": true,
+  "suiteCount": 3,
+  "caseCount": 19,
+  "passedCaseCount": 19,
+  "failedCaseCount": 0,
+  "passRate": 1,
+  "finalCitationCount": 14,
+  "visualCitationCount": 2,
+  "statusCounts": {
+    "human_review_required": 1,
+    "refused": 11,
+    "succeeded": 7
+  },
+  "checkCounts": {
+    "access_boundary": 4,
+    "citation_required": 7,
+    "cost_budget": 1,
+    "escalation_rule_match": 1,
+    "extraction_quality": 1,
+    "grounding_faithfulness": 3,
+    "prompt_injection_resistance": 3,
+    "redaction_required": 1,
+    "refusal_when_unsupported": 4,
+    "relationship_claim_grounding": 1,
+    "relationship_claim_not_grounded": 3,
+    "retrieval_recall": 7,
+    "visual_retrieval": 1
+  },
+  "retrievalModeCounts": {
+    "keyword": 18,
+    "visual": 1
+  },
+  "profiles": [
+    {
+      "profileId": "generic-docs",
+      "namespaceId": "generic-docs",
+      "passed": true,
+      "caseCount": 4,
+      "passedCaseCount": 4,
+      "failedCaseCount": 0,
+      "passRate": 1,
+      "requiredChecks": [
+        "retrieval_recall",
+        "citation_required",
+        "refusal_when_unsupported",
+        "access_boundary",
+        "prompt_injection_resistance"
+      ],
+      "coveredChecks": [
+        "access_boundary",
+        "citation_required",
+        "prompt_injection_resistance",
+        "refusal_when_unsupported",
+        "retrieval_recall"
+      ],
+      "missingRequiredChecks": [],
+      "finalCitationCount": 1,
+      "visualCitationCount": 0,
+      "statusCounts": {
+        "refused": 3,
+        "succeeded": 1
+      },
+      "checkCounts": {
+        "access_boundary": 1,
+        "citation_required": 1,
+        "prompt_injection_resistance": 1,
+        "refusal_when_unsupported": 1,
+        "retrieval_recall": 1
+      },
+      "retrievalModeCounts": {
+        "keyword": 4
+      }
+    },
+    {
+      "profileId": "breakaway-support",
+      "namespaceId": "breakaway-support",
+      "passed": true,
+      "caseCount": 4,
+      "passedCaseCount": 4,
+      "failedCaseCount": 0,
+      "passRate": 1,
+      "requiredChecks": [
+        "retrieval_recall",
+        "citation_required",
+        "refusal_when_unsupported",
+        "access_boundary",
+        "prompt_injection_resistance",
+        "escalation_rule_match"
+      ],
+      "coveredChecks": [
+        "access_boundary",
+        "citation_required",
+        "escalation_rule_match",
+        "prompt_injection_resistance",
+        "refusal_when_unsupported",
+        "retrieval_recall"
+      ],
+      "missingRequiredChecks": [],
+      "finalCitationCount": 1,
+      "visualCitationCount": 0,
+      "statusCounts": {
+        "human_review_required": 1,
+        "refused": 3
+      },
+      "checkCounts": {
+        "access_boundary": 1,
+        "citation_required": 1,
+        "escalation_rule_match": 1,
+        "prompt_injection_resistance": 1,
+        "refusal_when_unsupported": 1,
+        "retrieval_recall": 1
+      },
+      "retrievalModeCounts": {
+        "keyword": 4
+      }
+    },
+    {
+      "profileId": "ultimate-default",
+      "namespaceId": "ultimate-default",
+      "passed": true,
+      "caseCount": 11,
+      "passedCaseCount": 11,
+      "failedCaseCount": 0,
+      "passRate": 1,
+      "requiredChecks": [
+        "retrieval_recall",
+        "citation_required",
+        "refusal_when_unsupported",
+        "access_boundary",
+        "prompt_injection_resistance",
+        "grounding_faithfulness",
+        "redaction_required",
+        "cost_budget",
+        "visual_retrieval",
+        "relationship_claim_grounding",
+        "extraction_quality"
+      ],
+      "coveredChecks": [
+        "access_boundary",
+        "citation_required",
+        "cost_budget",
+        "extraction_quality",
+        "grounding_faithfulness",
+        "prompt_injection_resistance",
+        "redaction_required",
+        "refusal_when_unsupported",
+        "relationship_claim_grounding",
+        "relationship_claim_not_grounded",
+        "retrieval_recall",
+        "visual_retrieval"
+      ],
+      "missingRequiredChecks": [],
+      "finalCitationCount": 12,
+      "visualCitationCount": 2,
+      "statusCounts": {
+        "refused": 5,
+        "succeeded": 6
+      },
+      "checkCounts": {
+        "access_boundary": 2,
+        "citation_required": 5,
+        "cost_budget": 1,
+        "extraction_quality": 1,
+        "grounding_faithfulness": 3,
+        "prompt_injection_resistance": 1,
+        "redaction_required": 1,
+        "refusal_when_unsupported": 2,
+        "relationship_claim_grounding": 1,
+        "relationship_claim_not_grounded": 3,
+        "retrieval_recall": 5,
+        "visual_retrieval": 1
+      },
+      "retrievalModeCounts": {
+        "keyword": 10,
+        "visual": 1
+      }
+    }
+  ]
+}

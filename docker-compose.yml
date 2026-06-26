@@ -1,0 +1,40 @@
+services:
+  rag:
+    build:
+      context: .
+      target: runtime
+    image: adaptable-rag:local
+    env_file:
+      - .env.example
+    environment:
+      RAG_HTTP_HOST: 0.0.0.0
+      RAG_HTTP_PORT: 8787
+      RAG_INDEX_KIND: json_file
+      RAG_INDEX_PATH: /data/index.json
+    ports:
+      - "8787:8787"
+    volumes:
+      - rag_data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8787/ready').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"
+        ]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+volumes:
+  rag_data:

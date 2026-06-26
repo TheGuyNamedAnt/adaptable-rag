@@ -1,0 +1,13 @@
+.git
+.github
+.Codex
+coverage
+dist
+node_modules
+npm-debug.log*
+.DS_Store
+.env
+.env.*
+!.env.example
+.rag
+*.local

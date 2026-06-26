@@ -1,0 +1,19 @@
+{
+  "sources": [
+    {
+      "sourceId": "curated_docs",
+      "rootDir": "/data/corpus/curated_docs",
+      "recursive": true,
+      "includeExtensions": [".md", ".txt", ".json", ".jsonl"],
+      "sourceKind": "local_file",
+      "trustTier": "trusted_internal",
+      "sensitivity": "internal",
+      "accessScope": {
+        "tenantId": "tenant_1",
+        "namespaceId": "generic-docs",
+        "roles": ["reader"],
+        "tags": ["curated", "docs"]
+      }
+    }
+  ]
+}

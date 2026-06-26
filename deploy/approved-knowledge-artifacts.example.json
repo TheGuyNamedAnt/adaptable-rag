@@ -1,0 +1,18 @@
+{
+  "sources": [
+    {
+      "sourceId": "approved_knowledge_generic-docs",
+      "ledgerPaths": ["/data/support/approval-ledger.json"],
+      "pathPrefix": "approved-knowledge",
+      "accessScope": {
+        "tenantId": "tenant_1",
+        "namespaceId": "generic-docs",
+        "roles": ["reader"],
+        "tags": ["approved-knowledge"]
+      },
+      "metadata": {
+        "connector": "support-bridge"
+      }
+    }
+  ]
+}

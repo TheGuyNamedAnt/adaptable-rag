@@ -1,0 +1,8 @@
+coverage/
+dist/
+node_modules/
+.rag/
+profiles/**/evals/*.jsonl
+Dockerfile
+.dockerignore
+.env.example
