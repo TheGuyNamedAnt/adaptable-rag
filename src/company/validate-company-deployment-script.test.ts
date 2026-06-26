@@ -26,6 +26,32 @@ test("validate-company-deployment script exits zero for ready company modules", 
   assert.deepEqual(summary.profiles[0]?.adapterIds, ["acme-support-api"]);
 });
 
+test("validate-company-deployment script validates full deployment exports through registry", () => {
+  const result = spawnSync(
+    process.execPath,
+    [
+      "scripts/validate-company-deployment.mjs",
+      "--module",
+      "dist/company/examples/acme-support.company.js",
+      "--export",
+      "acmeSupportDeployment"
+    ],
+    { encoding: "utf8" }
+  );
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stderr, "");
+  const summary = JSON.parse(result.stdout);
+  assert.equal(summary.status, "ready");
+  assert.equal(summary.companyId, "acme");
+  assert.equal(summary.adapterPackValidation.status, "passed");
+  assert.deepEqual(summary.adapterPackValidation.adapterPackExports, [
+    "acmeSupportDeployment.adapterPacks"
+  ]);
+  assert.equal(summary.adapterPackValidation.adapterPackCount, 1);
+  assert.equal(summary.adapterPackValidation.errorCount, 0);
+});
+
 test("validate-company-deployment script runs connector contracts from adapter pack exports", () => {
   const result = spawnSync(
     process.execPath,
@@ -149,6 +175,43 @@ test("validate-company-deployment script runs full pack contracts", () => {
     ),
     true
   );
+});
+
+test("validate-company-deployment script runs full pack contracts from deployment exports", () => {
+  const result = spawnSync(
+    process.execPath,
+    [
+      "scripts/validate-company-deployment.mjs",
+      "--module",
+      "dist/company/examples/acme-support.company.js",
+      "--export",
+      "acmeSupportDeployment",
+      "--run-pack-contracts",
+      "--use-case",
+      "support",
+      "--contract-mode",
+      "delta",
+      "--contract-requested-at",
+      "2026-06-24T00:00:00.000Z",
+      "--principal-role",
+      "support",
+      "--principal-tag",
+      "trusted"
+    ],
+    { encoding: "utf8" }
+  );
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stderr, "");
+  const summary = JSON.parse(result.stdout);
+  assert.equal(summary.status, "ready");
+  assert.equal(summary.adapterPackValidation.status, "passed");
+  assert.equal(summary.packContracts.status, "passed");
+  assert.deepEqual(summary.packContracts.adapterPackExports, [
+    "acmeSupportDeployment.adapterPacks"
+  ]);
+  assert.equal(summary.packContracts.checkedAdapterCount, 1);
+  assert.equal(summary.packContracts.checkedConnectorCount, 1);
 });
 
 test("validate-company-deployment script exits nonzero with safe readiness issues", () => {

@@ -121,10 +121,6 @@ export const companyDocsClient: CompanyDocsClient = {
   }
 };
 
-export const companyAdapterPack = createCompanyConnectorAdapterPack({
-  client: companyDocsClient
-});
-
 export function createCompanyConnectorAdapterPack(
   options: CompanyConnectorAdapterPackOptions
 ): CompanyAdapterPack {
@@ -236,6 +232,10 @@ export class CompanyDocsSourceConnector implements SourceConnector {
     };
   }
 }
+
+export const companyAdapterPack = createCompanyConnectorAdapterPack({
+  client: companyDocsClient
+});
 
 function sourceConnectorItem(item: CompanyDocsSyncItem, request: SourceConnectorSyncRequest) {
   if (item.operation === "upsert") {

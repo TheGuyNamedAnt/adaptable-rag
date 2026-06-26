@@ -116,6 +116,73 @@ test(
   }
 );
 
+test(
+  "SQLite FTS writer rebuilds and deletes keyword rows without deleting chunks",
+  { skip: sqliteSkipReason ?? false },
+  () => {
+    const index = new SqliteRagIndex({ filePath: sqlitePath(), now: () => FIXED_NOW });
+    const document = makeDocument({
+      id: "doc_sqlite_fts_writer",
+      body: "Keyword writer rebuilds refund policy rows."
+    });
+    const chunks = makeChunks(document);
+    index.addDocument(document);
+    index.addChunks(document.id, chunks);
+
+    const deleted = index.deleteKeywordChunksForDocument({
+      documentId: document.id,
+      filter: makeIndexFilter()
+    });
+
+    assert.equal(deleted.accepted, true);
+    assert.equal(index.listChunks(makeIndexFilter()).length, chunks.length);
+    assert.equal(
+      index.searchKeywordChunks({
+        query: "refund policy",
+        terms: ["refund", "policy"],
+        filter: makeIndexFilter(),
+        limit: 5
+      }).length,
+      0
+    );
+
+    const written = index.writeKeywordChunks({ chunks });
+
+    assert.equal(written.indexedChunkCount, chunks.length);
+    assert.equal(written.rejectedChunkCount, 0);
+    assert.equal(
+      index.searchKeywordChunks({
+        query: "refund policy",
+        terms: ["refund", "policy"],
+        filter: makeIndexFilter(),
+        limit: 5
+      }).length > 0,
+      true
+    );
+    index.close();
+  }
+);
+
+test(
+  "SQLite FTS writer rejects chunks that are not in canonical storage",
+  { skip: sqliteSkipReason ?? false },
+  () => {
+    const index = new SqliteRagIndex({ filePath: sqlitePath(), now: () => FIXED_NOW });
+    const document = makeDocument({
+      id: "doc_sqlite_missing_fts",
+      body: "Missing canonical chunk should not get keyword rows."
+    });
+    const chunks = makeChunks(document);
+
+    const result = index.writeKeywordChunks({ chunks });
+
+    assert.equal(result.indexedChunkCount, 0);
+    assert.equal(result.rejectedChunkCount, chunks.length);
+    assert.equal(result.results[0]?.accepted, false);
+    index.close();
+  }
+);
+
 function sqlitePath(): string {
   return path.join(mkdtempSync(path.join(tmpdir(), "adaptable-rag-sqlite-index-")), "index.sqlite");
 }

@@ -6,6 +6,15 @@ import { DEFAULT_CHUNKING_POLICY } from "../chunking/chunk-policy.js";
 import type { RagChunk } from "../documents/chunk.js";
 import type { RagDocument } from "../documents/document.js";
 import { evaluateAccess } from "../security/access-control.js";
+import type {
+  FtsDeleteChunksForDocumentRequest,
+  FtsIndexStore,
+  FtsIndexWriter,
+  FtsSearchRequest,
+  FtsSearchResult,
+  FtsWriteChunksRequest,
+  FtsWriteChunksResult
+} from "../storage/keyword-index.js";
 import type { ChunkStore } from "./chunk-store.js";
 import type { DocumentStore } from "./document-store.js";
 import { isValidIndexFilter } from "./index-filter.js";
@@ -42,25 +51,14 @@ export interface PostgresRagIndexReadinessCheck {
   }[];
 }
 
-export interface PostgresFtsSearchRequest {
-  readonly query: string;
-  readonly terms: readonly string[];
-  readonly filter: IndexFilter;
-  readonly limit: number;
-}
-
-export interface PostgresFtsSearchResult {
-  readonly chunk: IndexedChunk;
-  readonly score: number;
-  readonly matchedTerms: readonly string[];
-  readonly reasons: readonly string[];
-}
+export type PostgresFtsSearchRequest = FtsSearchRequest;
+export type PostgresFtsSearchResult = FtsSearchResult;
 
 type Queryable = Pick<Pool | PoolClient, "query">;
 
 const DEFAULT_SCHEMA = "rag_core";
 
-export class PostgresRagIndex implements DocumentStore, ChunkStore {
+export class PostgresRagIndex implements DocumentStore, ChunkStore, FtsIndexStore, FtsIndexWriter {
   readonly capabilities: IndexCapabilities = {
     storageKind: "postgres",
     durable: true,
@@ -339,6 +337,112 @@ export class PostgresRagIndex implements DocumentStore, ChunkStore {
 
   listChunks(filter: IndexFilter): Promise<readonly IndexedChunk[]> {
     return this.findChunks(filter);
+  }
+
+  async writeKeywordChunks(request: FtsWriteChunksRequest): Promise<FtsWriteChunksResult> {
+    const client = await this.pool.connect();
+    const results: IndexOperationResult[] = [];
+    try {
+      await client.query("begin");
+      for (const chunk of request.chunks) {
+        const stored = await this.getStoredChunk(chunk.id, client);
+        if (!stored) {
+          results.push({
+            accepted: false,
+            id: chunk.id,
+            message: "Chunk is not stored; keyword index row was not written."
+          });
+          continue;
+        }
+        if (stored.chunk.textHash !== chunk.textHash) {
+          results.push({
+            accepted: false,
+            id: chunk.id,
+            message:
+              "Chunk text hash does not match stored chunk; keyword index row was not written."
+          });
+          continue;
+        }
+
+        const result = await client.query(
+          `update ${this.q("chunks")}
+           set fts =
+             setweight(to_tsvector('english', coalesce($2, '')), 'A') ||
+             setweight(to_tsvector('english', coalesce($3, '')), 'B') ||
+             setweight(to_tsvector('english', coalesce($4, '')), 'C'),
+             updated_at = coalesce($5, updated_at)
+           where id = $1`,
+          [
+            chunk.id,
+            stored.chunk.provenance.title,
+            stored.chunk.citation.title,
+            stored.chunk.text,
+            request.indexedAt ?? null
+          ]
+        );
+        results.push({
+          accepted: (result.rowCount ?? 0) > 0,
+          id: chunk.id,
+          message:
+            (result.rowCount ?? 0) > 0
+              ? "Keyword index row written."
+              : "Keyword index row was not written."
+        });
+      }
+      await client.query("commit");
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
+
+    const indexedChunkCount = results.filter((result) => result.accepted).length;
+    return {
+      indexedChunkCount,
+      rejectedChunkCount: results.length - indexedChunkCount,
+      results
+    };
+  }
+
+  async deleteKeywordChunksForDocument(
+    request: FtsDeleteChunksForDocumentRequest
+  ): Promise<IndexChunkDeleteResult> {
+    if (!isValidIndexFilter(request.filter)) {
+      return {
+        accepted: false,
+        documentId: request.documentId,
+        deletedChunkCount: 0,
+        message: "Keyword chunk delete requires a valid tenant, namespace, and principal filter."
+      };
+    }
+
+    const allowed = await this.findChunks({ ...request.filter, documentIds: [request.documentId] });
+    if (allowed.length === 0) {
+      return {
+        accepted: false,
+        documentId: request.documentId,
+        deletedChunkCount: 0,
+        message: "No chunks were found or allowed for keyword index delete."
+      };
+    }
+
+    const result = await this.pool.query(
+      `update ${this.q("chunks")}
+       set fts = to_tsvector('english', '')
+       where id = any($1::text[])`,
+      [allowed.map((indexed) => indexed.chunk.id)]
+    );
+
+    return {
+      accepted: (result.rowCount ?? 0) > 0,
+      documentId: request.documentId,
+      deletedChunkCount: result.rowCount ?? 0,
+      message:
+        (result.rowCount ?? 0) > 0
+          ? "Keyword index rows deleted for document."
+          : "No keyword index rows were deleted."
+    };
   }
 
   async searchKeywordChunks(

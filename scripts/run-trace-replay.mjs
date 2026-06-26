@@ -3,11 +3,11 @@ import { access, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import {
-  breakawaySupportProfile,
   buildEvalTraceReplayReport,
   genericDocsProfile,
   renderEvalTraceReplayHtmlReport,
   runProfileEvalSuites,
+  sampleSupportProfile,
   ultimateDefaultProfile
 } from "../dist/index.js";
 
@@ -17,7 +17,7 @@ try {
   await assertReadable(options.evalSummaryPath);
   const baselineSummary = JSON.parse(await readFile(options.evalSummaryPath, "utf8"));
   const currentSummary = await runProfileEvalSuites({
-    profiles: [genericDocsProfile, breakawaySupportProfile, ultimateDefaultProfile],
+    profiles: [genericDocsProfile, sampleSupportProfile, ultimateDefaultProfile],
     projectRoot: process.cwd()
   });
   const report = buildEvalTraceReplayReport(baselineSummary, currentSummary, {

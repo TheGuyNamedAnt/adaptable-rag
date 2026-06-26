@@ -48,6 +48,18 @@ try {
     }))
   };
 
+  if (report.ready && deploymentShouldValidatePacks(deploymentInput, options)) {
+    summary.adapterPackValidation = validateDeploymentAdapterPacks({
+      moduleExports,
+      deploymentInput,
+      company,
+      options
+    });
+    if (summary.adapterPackValidation.status === "failed") {
+      summary.status = "failed";
+    }
+  }
+
   if (options.runPackContracts) {
     summary.packContracts = report.ready
       ? await runPackContractGate({
@@ -434,6 +446,43 @@ function adapterPacksForContracts(moduleExports, deploymentInput, options) {
   }
 
   return adapterPacksFromModule(moduleExports, options);
+}
+
+function deploymentShouldValidatePacks(deploymentInput, options) {
+  return deploymentInput.adapterPacks.length > 0 || options.adapterPackExportNames.length > 0;
+}
+
+function validateDeploymentAdapterPacks(input) {
+  try {
+    const { adapterPacks, exportNames } = adapterPacksForContracts(
+      input.moduleExports,
+      input.deploymentInput,
+      input.options
+    );
+    const registry = new CompanyDeploymentRegistry([
+      {
+        company: input.company,
+        adapterPacks
+      }
+    ]);
+
+    return {
+      ...safeAdapterPackValidationSummary(registry.getCompanyRequired(input.company.companyId)),
+      adapterPackExports: exportNames
+    };
+  } catch (error) {
+    return {
+      status: "failed",
+      adapterPackExports: [],
+      adapterPackCount: 0,
+      reportCount: 0,
+      errorCount: 1,
+      warningCount: 0,
+      reports: [],
+      issues: [],
+      error: safeError(error)
+    };
+  }
 }
 
 function adapterPacksFromModule(moduleExports, options) {

@@ -676,6 +676,8 @@ export type {
   SourceSyncWorkflowWarningCode
 } from "./runtime/source-sync-workflow.js";
 export { IngestPipeline } from "./ingestion/ingest-pipeline.js";
+export { BatchEmbeddingIndexer } from "./embeddings/batch-embedding-indexer.js";
+export { BatchIndexWriter } from "./ingestion/batch-index-writer.js";
 export type {
   IngestPipelineCheckpoint,
   IngestPipelineOptions,
@@ -683,6 +685,20 @@ export type {
   IngestPipelineResult,
   IngestPipelineResumeState
 } from "./ingestion/ingest-pipeline.js";
+export type {
+  BatchEmbeddingIndexerOptions,
+  BatchEmbeddingIndexRequest,
+  BatchEmbeddingIndexResult,
+  BatchEmbeddingIndexWarning
+} from "./embeddings/batch-embedding-indexer.js";
+export type {
+  BatchIndexDocumentInput,
+  BatchIndexFailedDocument,
+  BatchIndexRejectedDocument,
+  BatchIndexWriterOptions,
+  BatchIndexWriteRequest,
+  BatchIndexWriteResult
+} from "./ingestion/batch-index-writer.js";
 export { DEFAULT_CHUNKING_POLICY } from "./chunking/chunk-policy.js";
 export type {
   ChunkBoundaryStrategy,
@@ -919,9 +935,13 @@ export type { AdaptiveRetrievalControllerOptions } from "./retrieval/adaptive-re
 export { PostgresFtsKeywordRetriever } from "./retrieval/postgres-fts-keyword-retriever.js";
 export type { PostgresFtsKeywordRetrieverOptions } from "./retrieval/postgres-fts-keyword-retriever.js";
 export type {
+  FtsDeleteChunksForDocumentRequest,
   FtsIndexStore,
+  FtsIndexWriter,
   FtsSearchRequest,
   FtsSearchResult,
+  FtsWriteChunksRequest,
+  FtsWriteChunksResult,
   StorageMigrationCheck,
   StorageMigrationCheckItem,
   StorageMigrationCheckProvider,
@@ -1533,9 +1553,11 @@ export type {
 } from "./runtime/production-source-sync.js";
 export {
   createProductionIngestRuntime,
+  IngestionJobRunner,
   loadProductionIngestionConfigFromEnv
 } from "./runtime/production-ingestion.js";
 export type {
+  IngestionJobRunnerOptions,
   LoadProductionIngestionConfigFromEnvOptions,
   ProductionCorpusAdapterExtension,
   ProductionDocumentParserExtension,

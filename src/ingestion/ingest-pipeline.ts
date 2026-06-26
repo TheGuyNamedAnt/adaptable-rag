@@ -9,13 +9,10 @@ import type { RagChunk } from "../documents/chunk.js";
 import type { RagDocument } from "../documents/document.js";
 import type { ChunkStore } from "../indexing/chunk-store.js";
 import type { DocumentStore } from "../indexing/document-store.js";
-import type {
-  IndexFilter,
-  IndexOperationResult,
-  IndexOverwriteMode
-} from "../indexing/index-types.js";
+import type { IndexOperationResult, IndexOverwriteMode } from "../indexing/index-types.js";
 import type { ValidatedRagProfile } from "../profiles/profile-validation.js";
 import type { RequestPrincipal } from "../security/access-scope.js";
+import { BatchIndexWriter } from "./batch-index-writer.js";
 import {
   analyzeParserQualityForDocuments,
   type ParserQualitySummary,
@@ -79,15 +76,16 @@ export interface IngestPipelineOptions {
 
 export class IngestPipeline {
   private readonly adapterRegistry: CorpusAdapterRegistry;
-  private readonly documentStore: DocumentStore;
-  private readonly chunkStore: ChunkStore;
+  private readonly indexWriter: BatchIndexWriter;
   private readonly chunkingPolicy: ChunkingPolicy;
   private readonly now: () => string;
 
   constructor(options: IngestPipelineOptions) {
     this.adapterRegistry = options.adapterRegistry;
-    this.documentStore = options.documentStore;
-    this.chunkStore = options.chunkStore;
+    this.indexWriter = new BatchIndexWriter({
+      documentStore: options.documentStore,
+      chunkStore: options.chunkStore
+    });
     this.chunkingPolicy = options.chunkingPolicy ?? DEFAULT_CHUNKING_POLICY;
     this.now = options.now ?? (() => new Date().toISOString());
   }
@@ -174,38 +172,21 @@ export class IngestPipeline {
           continue;
         }
 
-        const documentResult = await this.documentStore.addDocument(document, {
+        const writeResult = await this.indexWriter.write({
+          documents: [
+            {
+              document,
+              chunks: chunked.chunks
+            }
+          ],
           overwriteMode: request.overwriteMode ?? "reject",
           indexedAt: startedAt
         });
-        indexResults.push(documentResult);
+        indexResults.push(...writeResult.indexResults);
 
-        if (!documentResult.accepted) {
-          continue;
-        }
-
-        documents.push(document);
-
-        chunkingWarnings.push(...chunked.warnings);
-        let chunkResults: readonly IndexOperationResult[];
-        try {
-          chunkResults = await this.chunkStore.addChunks(document.id, chunked.chunks, {
-            overwriteMode: request.overwriteMode ?? "reject",
-            indexedAt: startedAt
-          });
-        } catch (error) {
-          await rollbackDocument({
-            document,
-            documentStore: this.documentStore,
-            chunkStore: this.chunkStore
-          });
-
-          if (!isChunkIndexValidationError(error)) {
-            throw error;
-          }
-
-          const message =
-            error instanceof Error ? error.message : "Document chunks failed index validation.";
+        if (writeResult.failedDocuments.length > 0) {
+          const failure = writeResult.failedDocuments[0];
+          const message = failure?.message ?? "Document chunks failed index validation.";
           rejectedRecords.push({
             recordId: document.id,
             sourceId: document.provenance.sourceId,
@@ -216,15 +197,16 @@ export class IngestPipeline {
             code: "chunk_index_validation_failed",
             message
           });
-          documents.pop();
           continue;
         }
-        indexResults.push(...chunkResults);
 
-        const acceptedChunkIds = new Set(
-          chunkResults.filter((result) => result.accepted).map((result) => result.id)
-        );
-        chunks.push(...chunked.chunks.filter((chunk) => acceptedChunkIds.has(chunk.id)));
+        if (writeResult.acceptedDocuments.length === 0) {
+          continue;
+        }
+
+        documents.push(document);
+        chunkingWarnings.push(...chunked.warnings);
+        chunks.push(...writeResult.acceptedChunks);
         completedDocumentIds.add(document.id);
         await request.onCheckpoint?.({
           phase: "document_indexed",
@@ -272,35 +254,4 @@ function isDocumentChunkLimitError(
     error instanceof ChunkingPolicyError &&
     error.issues.some((issue) => issue.includes(`Document "${documentId}" would create`))
   );
-}
-
-function isChunkIndexValidationError(error: unknown): boolean {
-  return error instanceof Error && error.message.startsWith("Chunks rejected by index validation:");
-}
-
-async function rollbackDocument(input: {
-  readonly document: RagDocument;
-  readonly documentStore: DocumentStore;
-  readonly chunkStore: ChunkStore;
-}): Promise<void> {
-  const filter = rollbackFilter(input.document);
-  await input.chunkStore.deleteChunksForDocument(input.document.id, filter);
-  await input.documentStore.deleteDocument(input.document.id, filter);
-}
-
-function rollbackFilter(document: RagDocument): IndexFilter {
-  const scope = document.accessScope;
-  return {
-    namespaceId: document.namespaceId,
-    tenantId: scope.tenantId,
-    principal: {
-      userId: scope.userIds?.[0] ?? "ingest_rollback",
-      tenantId: scope.tenantId,
-      namespaceIds: [scope.namespaceId],
-      teamIds: [...(scope.teamIds ?? [])],
-      roles: [...(scope.roles ?? [])],
-      tags: [...(scope.tags ?? [])]
-    },
-    documentIds: [document.id]
-  };
 }

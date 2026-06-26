@@ -1,18 +1,18 @@
 import {
   buildEvalBenchmarkSnapshot,
   buildRegressionDashboardArtifact,
-  breakawaySupportProfile,
   compareEvalBenchmarks,
   genericDocsProfile,
   renderEvalHtmlReport,
   runProfileEvalSuites,
+  sampleSupportProfile,
   ultimateDefaultProfile
 } from "../dist/index.js";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 const summary = await runProfileEvalSuites({
-  profiles: [genericDocsProfile, breakawaySupportProfile, ultimateDefaultProfile],
+  profiles: [genericDocsProfile, sampleSupportProfile, ultimateDefaultProfile],
   projectRoot: process.cwd()
 });
 const options = parseArgs(process.argv.slice(2));

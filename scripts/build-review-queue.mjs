@@ -3,11 +3,11 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import {
-  breakawaySupportProfile,
   buildHumanReviewQueue,
   genericDocsProfile,
   redactText,
   renderHumanReviewQueueMarkdown,
+  sampleSupportProfile,
   ultimateDefaultProfile
 } from "../dist/index.js";
 
@@ -23,7 +23,7 @@ try {
   const queue = buildHumanReviewQueue({
     ...(options.queueId === undefined ? {} : { queueId: options.queueId }),
     ...(options.generatedAt === undefined ? {} : { generatedAt: options.generatedAt }),
-    profiles: [genericDocsProfile, breakawaySupportProfile, ultimateDefaultProfile],
+    profiles: [genericDocsProfile, sampleSupportProfile, ultimateDefaultProfile],
     evalSummary,
     evalSummaryPath: options.evalSummaryPath,
     ...(incidentBundle === undefined

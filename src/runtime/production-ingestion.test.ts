@@ -35,6 +35,7 @@ import {
 } from "./ingestion-job.js";
 import {
   createProductionIngestRuntime,
+  IngestionJobRunner,
   loadProductionIngestionConfigFromEnv,
   type ProductionIngestionConfig
 } from "./production-ingestion.js";
@@ -332,6 +333,49 @@ test("ingests local files through the production runtime and indexes vectors", a
   });
   assert.equal(retry.status, "completed");
   assert.deepEqual((await jobStore.get("ingest_prod_test"))?.counts, retry.counts);
+});
+
+test("IngestionJobRunner runs a production ingestion job directly", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "rag-production-runner-"));
+  const docsDir = path.join(tempDir, "docs");
+  await mkdir(docsDir);
+  await writeFile(path.join(docsDir, "runner.md"), "Runner policy content.", "utf8");
+  const index = new InMemoryRagIndex({ now: () => FIXED_NOW });
+  const jobStore = new InMemoryIngestionJobStore();
+  const checkpointStore = new InMemoryIngestionCheckpointStore();
+  const progressStore = new InMemoryIngestionProgressStore();
+  const runner = new IngestionJobRunner({
+    app: fakeApp({ index }),
+    config: localFilesConfig(docsDir),
+    jobStore,
+    checkpointStore,
+    progressStore,
+    now: () => FIXED_NOW
+  });
+
+  const result = await runner.run({
+    tenantId: "tenant_1",
+    namespaceId: profile.namespaceId,
+    principal,
+    sourceIds: ["curated_docs"],
+    overwriteMode: "replace",
+    runId: "ingest_runner_test",
+    requestedAt: FIXED_NOW
+  });
+
+  assert.equal(result.status, "completed");
+  assert.equal(result.counts.documentsAccepted, 1);
+  assert.equal((await jobStore.get("ingest_runner_test"))?.status, "completed");
+  assert.equal(
+    (await checkpointStore.list("ingest_runner_test")).some(
+      (checkpoint) => checkpoint.stage === "indexing"
+    ),
+    true
+  );
+  assert.deepEqual(
+    (await progressStore.listDocuments("ingest_runner_test")).map((document) => document.status),
+    ["accepted"]
+  );
 });
 
 test("production ingestion indexes layout relation vectors when embeddings are configured", async () => {

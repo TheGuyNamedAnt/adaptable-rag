@@ -25,15 +25,13 @@ import {
   type SourceSensitivity,
   type TrustTier
 } from "../documents/trust-tier.js";
-import { EmbeddingIndexer, type EmbeddingIndexWarning } from "../embeddings/embedding-indexer.js";
-import {
-  LayoutRelationIndexer,
-  type LayoutRelationIndexWarning
-} from "../embeddings/layout-relation-indexer.js";
+import type { EmbeddingIndexWarning } from "../embeddings/embedding-indexer.js";
+import type { LayoutRelationIndexWarning } from "../embeddings/layout-relation-indexer.js";
 import {
   VisualEmbeddingIndexer,
   type VisualEmbeddingIndexWarning
 } from "../embeddings/visual-embedding-indexer.js";
+import { BatchEmbeddingIndexer } from "../embeddings/batch-embedding-indexer.js";
 import {
   IngestPipeline,
   type IngestPipelineResumeState,
@@ -325,215 +323,235 @@ function approvedKnowledgeArtifactsConfigFromPath(
   };
 }
 
+export type IngestionJobRunnerOptions = ProductionIngestRuntimeOptions;
+
+export class IngestionJobRunner implements ProductionIngestRuntime {
+  private readonly options: ProductionIngestRuntimeOptions;
+  private readonly config: ProductionIngestionConfig;
+  private readonly now: () => string;
+  private readonly jobStore: IngestionJobStore | undefined;
+  private readonly checkpointStore: IngestionCheckpointStore | undefined;
+  private readonly progressStore: IngestionProgressStore | undefined;
+  private readonly adapterExtensions: readonly ProductionCorpusAdapterExtension[];
+  private readonly parserExtensions: readonly ProductionDocumentParserExtension[];
+
+  constructor(options: IngestionJobRunnerOptions) {
+    this.options = options;
+    this.config =
+      options.config ??
+      loadProductionIngestionConfigFromEnv({
+        ...(options.env === undefined ? {} : { env: options.env }),
+        ...(options.cwd === undefined ? {} : { cwd: options.cwd })
+      });
+    this.now = options.now ?? (() => new Date().toISOString());
+    this.jobStore = options.jobStore ?? defaultIngestionJobStore(options);
+    this.checkpointStore = options.checkpointStore ?? defaultIngestionCheckpointStore(options);
+    this.progressStore = options.progressStore ?? defaultIngestionProgressStore(options);
+    this.adapterExtensions = normalizeAdapterExtensions(options.adapterExtensions ?? []);
+    this.parserExtensions = normalizeParserExtensions([
+      ...(options.parserExtensions ?? []),
+      ...localParserExtensionsFromEnv(options),
+      ...parserExtensionsFromEnv(options)
+    ]);
+  }
+
+  async ingest(input: ProductionRagIngestInput): Promise<ProductionRagIngestResponse> {
+    return this.run(input);
+  }
+
+  async run(input: ProductionRagIngestInput): Promise<ProductionRagIngestResponse> {
+    const app = this.options.app;
+    const now = this.now;
+    const jobStore = this.jobStore;
+    const checkpointStore = this.checkpointStore;
+    const progressStore = this.progressStore;
+    const request = normalizeProductionIngestInput(app, input);
+    const jobId =
+      request.runId ?? `ingest_${(request.requestedAt ?? now()).replace(/[^0-9a-z]/gi, "")}`;
+    const existingJob = await startIngestionJob(jobStore, {
+      jobId,
+      runId: jobId,
+      tenantId: request.tenantId,
+      namespaceId: request.namespaceId,
+      sourceIds: request.sourceIds ?? [],
+      requestedAt: request.requestedAt ?? now()
+    });
+    const resumeState = resumeStateFromJob(existingJob);
+    await jobStore?.update({
+      jobId,
+      status: "loading_source",
+      stage: "loading_source",
+      startedAt: request.requestedAt ?? now(),
+      checkpoint: {
+        phase: "selected_sources_pending",
+        ...resumeState
+      },
+      updatedAt: now()
+    });
+    const sources = selectedSources(app, request.sourceIds);
+    await jobStore?.update({
+      jobId,
+      status: "loading_source",
+      stage: "loading_source",
+      checkpoint: {
+        phase: "selected_sources",
+        sourceIds: sources.map((source) => source.id),
+        ...resumeState
+      },
+      updatedAt: now()
+    });
+    const adapterRegistry = adapterRegistryForSources(
+      sources,
+      this.config,
+      this.adapterExtensions,
+      this.parserExtensions
+    );
+    for (const source of sources) {
+      await progressStore?.updateSource({
+        jobId,
+        sourceId: source.id,
+        status: "queued",
+        updatedAt: now()
+      });
+    }
+    const pipeline = new IngestPipeline({
+      adapterRegistry,
+      documentStore: app.chunkStore,
+      chunkStore: app.chunkStore,
+      now
+    });
+    try {
+      await jobStore?.update({
+        jobId,
+        status: "normalizing",
+        stage: "normalizing",
+        checkpoint: { phase: "core_ingestion_started" },
+        updatedAt: now()
+      });
+      await saveCheckpoint(checkpointStore, {
+        jobId,
+        stage: "normalizing",
+        checkpoint: { phase: "core_ingestion_started" },
+        recordedAt: now()
+      });
+      const ingestResult = await pipeline.ingest({
+        profile: app.profile,
+        requestedBy: request.principal,
+        sourceIds: sources.map((source) => source.id),
+        overwriteMode: request.overwriteMode,
+        runId: jobId,
+        resumeState,
+        onCheckpoint: async (checkpoint) => {
+          const stage = stageForPipelineCheckpoint(checkpoint.phase);
+          await jobStore?.update({
+            jobId,
+            status: stage,
+            stage,
+            checkpoint,
+            updatedAt: now()
+          });
+          await saveCheckpoint(checkpointStore, {
+            jobId,
+            stage,
+            checkpoint,
+            recordedAt: now()
+          });
+          if (checkpoint.phase === "document_indexed") {
+            await progressStore?.updateDocument({
+              jobId,
+              sourceId: checkpoint.sourceId,
+              documentId: checkpoint.documentId,
+              status: "accepted",
+              finishedAt: now(),
+              updatedAt: now()
+            });
+            await progressStore?.updateSource({
+              jobId,
+              sourceId: checkpoint.sourceId,
+              status: "loading",
+              acceptedDocumentCount: checkpoint.completedDocumentIds.filter((documentId) =>
+                documentId.trim()
+              ).length,
+              updatedAt: now()
+            });
+          }
+          if (checkpoint.phase === "source_completed") {
+            await progressStore?.updateSource({
+              jobId,
+              sourceId: checkpoint.sourceId,
+              status: "completed",
+              acceptedDocumentCount: checkpoint.completedDocumentIds.length,
+              finishedAt: now(),
+              updatedAt: now()
+            });
+          }
+        },
+        ...(request.requestedAt === undefined ? {} : { requestedAt: request.requestedAt })
+      });
+      await jobStore?.update({
+        jobId,
+        status: "embedding",
+        stage: "embedding",
+        checkpoint: {
+          phase: "core_ingestion_completed",
+          documentCount: ingestResult.documents.length,
+          chunkCount: ingestResult.chunks.length,
+          rejectedRecordCount: ingestResult.rejectedRecords.length
+        },
+        updatedAt: now()
+      });
+      const vector = await maybeIndexEmbeddings({
+        app,
+        ingestResult,
+        overwriteMode: request.overwriteMode,
+        requestedAt: ingestResult.startedAt
+      });
+      await jobStore?.update({
+        jobId,
+        status: "embedding",
+        stage: "visual_embedding",
+        checkpoint: { phase: "embedding_completed", vectorStatus: vector.vector.status },
+        updatedAt: now()
+      });
+      const visualVector = await maybeIndexVisualEmbeddings({
+        app,
+        ingestResult,
+        overwriteMode: request.overwriteMode,
+        requestedAt: ingestResult.startedAt
+      });
+
+      const summary = await summarizeIngestResult(app, ingestResult, vector, visualVector);
+      const finalStatus = ingestCompletedStatus(summary);
+      await jobStore?.update({
+        jobId,
+        status: finalStatus,
+        stage: finalStatus,
+        finishedAt: summary.finishedAt,
+        checkpoint: { phase: "completed" },
+        counts: summary.counts,
+        updatedAt: summary.finishedAt
+      });
+      return summary;
+    } catch (error) {
+      await jobStore?.update({
+        jobId,
+        status: "failed",
+        stage: "failed",
+        finishedAt: now(),
+        checkpoint: { phase: "failed" },
+        errorName: error instanceof Error ? error.name : "IngestionError",
+        errorMessage: error instanceof Error ? error.message : "Production ingestion failed.",
+        updatedAt: now()
+      });
+      throw error;
+    }
+  }
+}
+
 export function createProductionIngestRuntime(
   options: ProductionIngestRuntimeOptions
 ): ProductionIngestRuntime {
-  const config =
-    options.config ??
-    loadProductionIngestionConfigFromEnv({
-      ...(options.env === undefined ? {} : { env: options.env }),
-      ...(options.cwd === undefined ? {} : { cwd: options.cwd })
-    });
-  const now = options.now ?? (() => new Date().toISOString());
-  const jobStore = options.jobStore ?? defaultIngestionJobStore(options);
-  const checkpointStore = options.checkpointStore ?? defaultIngestionCheckpointStore(options);
-  const progressStore = options.progressStore ?? defaultIngestionProgressStore(options);
-  const adapterExtensions = normalizeAdapterExtensions(options.adapterExtensions ?? []);
-  const parserExtensions = normalizeParserExtensions([
-    ...(options.parserExtensions ?? []),
-    ...localParserExtensionsFromEnv(options),
-    ...parserExtensionsFromEnv(options)
-  ]);
-
-  return {
-    ingest: async (input) => {
-      const request = normalizeProductionIngestInput(options.app, input);
-      const jobId =
-        request.runId ?? `ingest_${(request.requestedAt ?? now()).replace(/[^0-9a-z]/gi, "")}`;
-      const existingJob = await startIngestionJob(jobStore, {
-        jobId,
-        runId: jobId,
-        tenantId: request.tenantId,
-        namespaceId: request.namespaceId,
-        sourceIds: request.sourceIds ?? [],
-        requestedAt: request.requestedAt ?? now()
-      });
-      const resumeState = resumeStateFromJob(existingJob);
-      await jobStore?.update({
-        jobId,
-        status: "loading_source",
-        stage: "loading_source",
-        startedAt: request.requestedAt ?? now(),
-        checkpoint: {
-          phase: "selected_sources_pending",
-          ...resumeState
-        },
-        updatedAt: now()
-      });
-      const sources = selectedSources(options.app, request.sourceIds);
-      await jobStore?.update({
-        jobId,
-        status: "loading_source",
-        stage: "loading_source",
-        checkpoint: {
-          phase: "selected_sources",
-          sourceIds: sources.map((source) => source.id),
-          ...resumeState
-        },
-        updatedAt: now()
-      });
-      const adapterRegistry = adapterRegistryForSources(
-        sources,
-        config,
-        adapterExtensions,
-        parserExtensions
-      );
-      for (const source of sources) {
-        await progressStore?.updateSource({
-          jobId,
-          sourceId: source.id,
-          status: "queued",
-          updatedAt: now()
-        });
-      }
-      const pipeline = new IngestPipeline({
-        adapterRegistry,
-        documentStore: options.app.chunkStore,
-        chunkStore: options.app.chunkStore,
-        now
-      });
-      try {
-        await jobStore?.update({
-          jobId,
-          status: "normalizing",
-          stage: "normalizing",
-          checkpoint: { phase: "core_ingestion_started" },
-          updatedAt: now()
-        });
-        await saveCheckpoint(checkpointStore, {
-          jobId,
-          stage: "normalizing",
-          checkpoint: { phase: "core_ingestion_started" },
-          recordedAt: now()
-        });
-        const ingestResult = await pipeline.ingest({
-          profile: options.app.profile,
-          requestedBy: request.principal,
-          sourceIds: sources.map((source) => source.id),
-          overwriteMode: request.overwriteMode,
-          runId: jobId,
-          resumeState,
-          onCheckpoint: async (checkpoint) => {
-            const stage = stageForPipelineCheckpoint(checkpoint.phase);
-            await jobStore?.update({
-              jobId,
-              status: stage,
-              stage,
-              checkpoint,
-              updatedAt: now()
-            });
-            await saveCheckpoint(checkpointStore, {
-              jobId,
-              stage,
-              checkpoint,
-              recordedAt: now()
-            });
-            if (checkpoint.phase === "document_indexed") {
-              await progressStore?.updateDocument({
-                jobId,
-                sourceId: checkpoint.sourceId,
-                documentId: checkpoint.documentId,
-                status: "accepted",
-                finishedAt: now(),
-                updatedAt: now()
-              });
-              await progressStore?.updateSource({
-                jobId,
-                sourceId: checkpoint.sourceId,
-                status: "loading",
-                acceptedDocumentCount: checkpoint.completedDocumentIds.filter((documentId) =>
-                  documentId.trim()
-                ).length,
-                updatedAt: now()
-              });
-            }
-            if (checkpoint.phase === "source_completed") {
-              await progressStore?.updateSource({
-                jobId,
-                sourceId: checkpoint.sourceId,
-                status: "completed",
-                acceptedDocumentCount: checkpoint.completedDocumentIds.length,
-                finishedAt: now(),
-                updatedAt: now()
-              });
-            }
-          },
-          ...(request.requestedAt === undefined ? {} : { requestedAt: request.requestedAt })
-        });
-        await jobStore?.update({
-          jobId,
-          status: "embedding",
-          stage: "embedding",
-          checkpoint: {
-            phase: "core_ingestion_completed",
-            documentCount: ingestResult.documents.length,
-            chunkCount: ingestResult.chunks.length,
-            rejectedRecordCount: ingestResult.rejectedRecords.length
-          },
-          updatedAt: now()
-        });
-        const vector = await maybeIndexEmbeddings({
-          app: options.app,
-          ingestResult,
-          overwriteMode: request.overwriteMode,
-          requestedAt: ingestResult.startedAt
-        });
-        await jobStore?.update({
-          jobId,
-          status: "embedding",
-          stage: "visual_embedding",
-          checkpoint: { phase: "embedding_completed", vectorStatus: vector.vector.status },
-          updatedAt: now()
-        });
-        const visualVector = await maybeIndexVisualEmbeddings({
-          app: options.app,
-          ingestResult,
-          overwriteMode: request.overwriteMode,
-          requestedAt: ingestResult.startedAt
-        });
-
-        const summary = await summarizeIngestResult(
-          options.app,
-          ingestResult,
-          vector,
-          visualVector
-        );
-        const finalStatus = ingestCompletedStatus(summary);
-        await jobStore?.update({
-          jobId,
-          status: finalStatus,
-          stage: finalStatus,
-          finishedAt: summary.finishedAt,
-          checkpoint: { phase: "completed" },
-          counts: summary.counts,
-          updatedAt: summary.finishedAt
-        });
-        return summary;
-      } catch (error) {
-        await jobStore?.update({
-          jobId,
-          status: "failed",
-          stage: "failed",
-          finishedAt: now(),
-          checkpoint: { phase: "failed" },
-          errorName: error instanceof Error ? error.name : "IngestionError",
-          errorMessage: error instanceof Error ? error.message : "Production ingestion failed.",
-          updatedAt: now()
-        });
-        throw error;
-      }
-    }
-  };
+  return new IngestionJobRunner(options);
 }
 
 async function startIngestionJob(
@@ -1039,21 +1057,11 @@ async function maybeIndexEmbeddings(input: {
     };
   }
 
-  const indexer = new EmbeddingIndexer({
+  const result = await new BatchEmbeddingIndexer({
     adapter: embeddingAdapter,
     vectorStore: input.app.vectorStore,
     now: () => input.requestedAt
-  });
-  const result = await indexer.indexChunks({
-    chunks: input.ingestResult.chunks,
-    requestedAt: input.requestedAt,
-    overwriteMode: input.overwriteMode
-  });
-  const relationResult = await new LayoutRelationIndexer({
-    adapter: embeddingAdapter,
-    vectorStore: input.app.vectorStore,
-    now: () => input.requestedAt
-  }).indexRelations({
+  }).index({
     documents: input.ingestResult.documents,
     chunks: input.ingestResult.chunks,
     requestedAt: input.requestedAt,
@@ -1061,13 +1069,13 @@ async function maybeIndexEmbeddings(input: {
   });
   const vectorCount = await vectorCountFor(input.app.vectorStore);
   const warnings = [
-    ...result.warnings.map(
+    ...result.text.warnings.map(
       (warning): ProductionRagIngestEmbeddingWarning => ({
         code: warning.code,
         ...(warning.chunkId === undefined ? {} : { chunkId: warning.chunkId })
       })
     ),
-    ...relationResult.warnings.map(
+    ...result.relations.warnings.map(
       (warning): ProductionRagIngestEmbeddingWarning => ({
         code: warning.code,
         ...(warning.documentId === undefined ? {} : { documentId: warning.documentId }),
@@ -1083,8 +1091,8 @@ async function maybeIndexEmbeddings(input: {
       modelName: result.modelName,
       dimensions: result.dimensions,
       indexedVectorCount: result.indexedVectorCount,
-      indexedRelationVectorCount: relationResult.indexedRelationVectorCount,
-      candidateRelationCount: relationResult.candidateRelationCount,
+      indexedRelationVectorCount: result.indexedRelationVectorCount,
+      candidateRelationCount: result.candidateRelationCount,
       vectorCount,
       warningCount: warnings.length
     },

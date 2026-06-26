@@ -9,7 +9,15 @@ import type { RagChunk } from "../documents/chunk.js";
 import type { RagDocument } from "../documents/document.js";
 import { evaluateAccess } from "../security/access-control.js";
 import type { StorageMigrationCheck } from "../storage/migration-check.js";
-import type { FtsSearchRequest, FtsSearchResult } from "../storage/keyword-index.js";
+import type {
+  FtsDeleteChunksForDocumentRequest,
+  FtsIndexStore,
+  FtsIndexWriter,
+  FtsSearchRequest,
+  FtsSearchResult,
+  FtsWriteChunksRequest,
+  FtsWriteChunksResult
+} from "../storage/keyword-index.js";
 import type { ChunkStore } from "./chunk-store.js";
 import type { DocumentStore } from "./document-store.js";
 import { isValidIndexFilter } from "./index-filter.js";
@@ -64,7 +72,7 @@ interface FtsChunkRow extends ChunkRow {
 const require = createRequire(import.meta.url);
 const SQLITE_RAG_INDEX_SCHEMA_VERSION = 1;
 
-export class SqliteRagIndex implements DocumentStore, ChunkStore {
+export class SqliteRagIndex implements DocumentStore, ChunkStore, FtsIndexStore, FtsIndexWriter {
   readonly capabilities: IndexCapabilities = {
     storageKind: "sqlite",
     durable: true,
@@ -327,6 +335,81 @@ export class SqliteRagIndex implements DocumentStore, ChunkStore {
 
   listChunks(filter: IndexFilter): readonly IndexedChunk[] {
     return this.findChunks(filter);
+  }
+
+  writeKeywordChunks(request: FtsWriteChunksRequest): FtsWriteChunksResult {
+    const results: IndexOperationResult[] = [];
+    this.transaction(() => {
+      for (const chunk of request.chunks) {
+        const stored = this.getStoredChunk(chunk.id);
+        if (!stored) {
+          results.push({
+            accepted: false,
+            id: chunk.id,
+            message: "Chunk is not stored; keyword index row was not written."
+          });
+          continue;
+        }
+        if (stored.chunk.textHash !== chunk.textHash) {
+          results.push({
+            accepted: false,
+            id: chunk.id,
+            message:
+              "Chunk text hash does not match stored chunk; keyword index row was not written."
+          });
+          continue;
+        }
+
+        this.upsertFtsChunk(stored.chunk);
+        results.push({
+          accepted: true,
+          id: chunk.id,
+          message: "Keyword index row written."
+        });
+      }
+    });
+
+    const indexedChunkCount = results.filter((result) => result.accepted).length;
+    return {
+      indexedChunkCount,
+      rejectedChunkCount: results.length - indexedChunkCount,
+      results
+    };
+  }
+
+  deleteKeywordChunksForDocument(
+    request: FtsDeleteChunksForDocumentRequest
+  ): IndexChunkDeleteResult {
+    if (!isValidIndexFilter(request.filter)) {
+      return {
+        accepted: false,
+        documentId: request.documentId,
+        deletedChunkCount: 0,
+        message: "Keyword chunk delete requires a valid tenant, namespace, and principal filter."
+      };
+    }
+
+    const allowed = this.findChunks({ ...request.filter, documentIds: [request.documentId] });
+    if (allowed.length === 0) {
+      return {
+        accepted: false,
+        documentId: request.documentId,
+        deletedChunkCount: 0,
+        message: "No chunks were found or allowed for keyword index delete."
+      };
+    }
+
+    this.transaction(() => {
+      for (const indexed of allowed) {
+        this.db.prepare("DELETE FROM chunk_fts WHERE chunk_id = ?").run(indexed.chunk.id);
+      }
+    });
+    return {
+      accepted: true,
+      documentId: request.documentId,
+      deletedChunkCount: allowed.length,
+      message: "Keyword index rows deleted for document."
+    };
   }
 
   searchKeywordChunks(request: FtsSearchRequest): readonly FtsSearchResult[] {
