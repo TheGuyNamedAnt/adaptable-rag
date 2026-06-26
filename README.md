@@ -24,78 +24,20 @@ RAG_APP_PROFILE_PRESET=generic-docs RAG_HTTP_AUTH_MODE=disabled npm run serve
 
 Production-oriented drills start from `.env.example`, `deploy/README.md`, and the company deployment runbook in `deploy/company-production-runbook.md`.
 
-## Current Slice
+## What It Includes
 
-Working in these parts of the system:
+Adaptable RAG is organized around reusable layers for profiles, ingestion, indexing,
+retrieval, answer grounding, provider boundaries, deployment checks, and operational
+review loops. The source tree includes:
 
-```text
-0. System Contract
-1. Profile Layer
-2. Corpus Adapter Layer
-3. Document Model + Provenance Layer
-4. Index Layer
-5. Retrieval Layer
-6. Context Builder Layer
-7. Answer Layer / Grounding Gate
-8. Model Adapter + Generation Orchestrator
-9. Real Provider Adapter Boundary
-10A. Architecture + Profile Hardening
-10. Security + Access Control Layer
-10C. Observability Runtime
-10D. Profile Runtime Enforcement
-10E. Corpus Hardening
-10F. Chunking Hardening
-10G. Index/Retrieval Hardening
-10H. Access/Observability Hardening
-10I. Code Quality/CI Hardening
-10J. Eval Harness
-10K. Real File-Loading Corpus Adapter
-10L. Embeddings + Vector Foundation
-10M. Hybrid Retrieval
-10N. Durable Vector Store + Provider Boundary
-10O. Provider Presets + Runtime Assembly
-10P. Live Runtime Config + Fetch Transport
-10Q. Provider Compatibility Presets
-10R. Hosted Vector Store Adapter Boundary
-10S. Reranker + Model-Backed Grounding Judge
-10T. Rerank/Judge Provider Presets + Live Wiring
-10U. Database/SaaS Corpus Adapters
-10V. Hosted Vector Vendor Transports
-10W. Production Entrypoints + Config/Secrets
-10X. Deployment Packaging
-10Y. Production Edge Hardening
-10Z. Production Operations Layer
-11A. Production Ingestion Entrypoint
-11B. Project Adapter Extension Boundary
-11C. Project Adapter SDK + Contract Tests
-12A. Query Planner Layer
-12B. RRF Hybrid + Planned-Query Fusion
-13A. Layout-Aware Document Model + Parser Adapter Boundary
-13B. Parser-Backed Local File Ingestion
-13C. Visual Multi-Vector Retrieval Boundary
-13D. Visual Ingestion + Durable Visual Store
-13E. Visual Provider Adapter Boundary
-13F. Provider Startup Self-Test
-13G. Hosted Visual Vector Store Boundary
-13H. Visual Retrieval Eval Gate + Hosted Visual Failure Drills
-14. Eval Reporting + Regression Benchmarking
-15. Provider Smoke Packs + Deployment Drills
-16. Trace Replay + Incident Forensics
-17. Production SLOs + Alerting Rules
-18. Alert Delivery Adapters
-19. Incident Bundle + Postmortem Export
-20. Human Review + Escalation Queue Boundary
-21. Review Decision Ledger + Feedback Loop
-22. External Review/Ticket Sync Adapter Boundary
-23. External Ticket Status Reconciliation + Idempotency Store
-24. Support Knowledge Flow + Approved Ingestion Handoff
-25. Project Support Event Export Boundary
-26. End-to-End Support Operator Drill
-27. Project Support Connector Template
-11. Observability Layer
-```
-
-The current slice includes the contracts, safety core, durable local stores, generic corpus adapters, source connector sync contracts, sync ledgers, sync runners, project adapter SDK contract tests, production ingestion entrypoint, project adapter extension boundary, parser/layout adapter boundary, parser-backed local file ingestion, layout-aware citations, visual multi-vector retrieval, visual ingestion, durable and hosted visual vector storage, visual provider adapter boundary, visual retrieval eval gates, hosted visual failure drills, eval reporting, provider smoke drills, trace replay, incident forensics, SLO alerting, alert delivery adapters, incident bundle/postmortem export, human review queue export, review decision ledger export, external review ticket sync export, external ticket status reconciliation, support event export validation, support knowledge approved-ingestion handoff, support operator drill, project support connector template, query planning, HyDE query expansion, retrieval budget/fusion optimization, structured knowledge-map retrieval, bounded multi-hop relationship traversal, relationship-path evidence, RRF fusion, generic provider presets, a bundled fetch transport, hosted vector-store boundary, hosted vector vendor transport presets, provider-backed reranker and grounding-judge presets, production CLI/HTTP entrypoints, edge auth/rate limiting, operations endpoints/logs/metrics, Docker/Compose packaging, startup self-tests, and runtime assembly helpers that every project-specific parser, provider, external vector store, visual embedding store, reranker, and production deployment must follow.
+- profile contracts, validation, and reusable presets
+- corpus, parser, source-sync, and project adapter boundaries
+- document, chunk, citation, ACL, and provenance validation
+- keyword, vector, visual-vector, and graph retrieval paths
+- context building, answer grounding, generation orchestration, and optional model-backed judges
+- provider presets for model, embedding, visual embedding, reranking, and hosted vector stores
+- production CLI/HTTP entrypoints, config loading, auth, rate limiting, logs, metrics, and self-tests
+- evals, trace replay, SLO checks, alert dry-runs, incident bundles, and human review exports
 
 ## Skeleton
 
@@ -1071,7 +1013,7 @@ That resolves the company use case, injects the generated validated profile into
 
 Runtime ingestion and answering still go through the same production pipeline, so company adaptation cannot bypass profile validation, source declarations, ACL checks, trust floors, freshness policy, citation policy, eval metadata, or safe traces.
 
-Validate a company deployment module in CI after build:
+Validate a company deployment wrapper in CI after build:
 
 ```bash
 npm run company:validate -- \
@@ -1087,8 +1029,7 @@ Add full pack contract execution to the same deployment check by exporting the c
 ```bash
 npm run company:validate -- \
   --module dist/company/examples/acme-support.company.js \
-  --export acmeSupportCompanyProfile \
-  --adapter-pack-export acmeSupportAdapterPack \
+  --export acmeSupportDeployment \
   --run-pack-contracts \
   --use-case support \
   --principal-role support \
@@ -1096,9 +1037,9 @@ npm run company:validate -- \
   --report-dir .rag/company/acme-support
 ```
 
-The script writes `company-deployment.json` and, when pack contracts run, `company-pack-contracts.json`. The pack report includes adapter, parser, source connector, permission mapper, coverage, issue-code, source-id, mode, count, and ledger summaries; it does not include connector records, parser bodies, warning payloads, source bodies, credentials, or principal claims.
+The validator accepts either a `CompanyProfile` export plus adapter-pack exports, or a deployment wrapper shaped like `{ company, adapterPacks }`. It writes `company-deployment.json` and, when pack contracts run, `company-pack-contracts.json`. The pack report includes adapter, parser, source connector, permission mapper, coverage, issue-code, source-id, mode, count, and ledger summaries; it does not include connector records, parser bodies, warning payloads, source bodies, credentials, or principal claims.
 
-Production startup can load the same compiled company module and adapter pack exports directly:
+Production startup loads the compiled company profile export and adapter pack exports directly:
 
 ```bash
 RAG_COMPANY_MODULE_PATH=dist/company/examples/acme-support.company.js \
