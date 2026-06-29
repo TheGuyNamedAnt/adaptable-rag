@@ -1,9 +1,12 @@
+import type { SourceKind } from "../documents/provenance.js";
+import type { TrustTier } from "../documents/trust-tier.js";
 import type { RagProfile } from "../profiles/profile.js";
 import type { GraphQueryRoute, PlannedQuery, QueryPlan } from "../query/query-types.js";
 import type {
   RetrievalBudgetTrace,
   RetrievalGraphRequestControls
 } from "../retrieval/retrieval-types.js";
+import { hashText } from "../shared/hash.js";
 
 const MAX_TOP_K = 100;
 const MAX_CANDIDATE_POOL_LIMIT = 5000;
@@ -41,8 +44,25 @@ export interface RetrievalBranchBudget {
   readonly topK: number;
   readonly fusionWeight: number;
   readonly candidatePoolLimit?: number;
+  readonly filter?: RetrievalBranchFilter;
+  readonly prefer?: RetrievalBranchPreference;
+  readonly primaryIntent?: string;
+  readonly sourceHintHashes?: readonly string[];
   readonly graph?: RetrievalGraphRequestControls;
   readonly reasons: readonly string[];
+}
+
+export interface RetrievalBranchFilter {
+  readonly sourceIds?: readonly string[];
+  readonly sourceKinds?: readonly SourceKind[];
+  readonly trustTiers?: readonly TrustTier[];
+}
+
+export interface RetrievalBranchPreference {
+  readonly sourceIds?: readonly string[];
+  readonly sourceKinds?: readonly SourceKind[];
+  readonly trustTiers?: readonly TrustTier[];
+  readonly fusionWeightMultiplier: number;
 }
 
 export interface DefaultRetrievalBudgetPolicyOptions {
@@ -158,6 +178,7 @@ export class DefaultRetrievalBudgetPolicy implements RetrievalBudgetPolicy {
     const parallel = request.queryPlan.queries.length > 1;
     const branches = request.queryPlan.queries.map((plannedQuery) =>
       this.branchBudget({
+        profile: request.profile,
         plannedQuery,
         queryPlan: request.queryPlan,
         requestedTopK,
@@ -176,6 +197,9 @@ export class DefaultRetrievalBudgetPolicy implements RetrievalBudgetPolicy {
       requestedTopK,
       maxRetrievalCalls,
       enabledQueryCount: enabledBranches.length,
+      primaryIntent: request.queryPlan.intent.primary,
+      secondaryIntentHashes: request.queryPlan.intent.secondary.map(hashText),
+      sourceHintHashes: request.queryPlan.intent.sourceHints.map(hashText),
       ...(totalCandidatePoolLimit === undefined ? {} : { totalCandidatePoolLimit }),
       disabledQueryIds: branches
         .filter((branch) => !branch.enabled)
@@ -185,6 +209,7 @@ export class DefaultRetrievalBudgetPolicy implements RetrievalBudgetPolicy {
   }
 
   private branchBudget(input: {
+    readonly profile: RagProfile;
     readonly plannedQuery: PlannedQuery;
     readonly queryPlan: QueryPlan;
     readonly requestedTopK: number;
@@ -224,8 +249,26 @@ export class DefaultRetrievalBudgetPolicy implements RetrievalBudgetPolicy {
       optionalMaxDepth: this.graphOptionalMaxDepth,
       optionalMaxVisitedEntities: this.graphOptionalMaxVisitedEntities
     });
+    const sourceRouteFilter = sourceHintRouteFilter(
+      input.profile,
+      input.queryPlan.intent.sourceHints
+    );
+    const sourceRoutePreference = sourceHintRoutePreference(
+      input.profile,
+      input.queryPlan.intent.sourceHints
+    );
 
     reasons.push(`kind:${input.plannedQuery.kind}`);
+    reasons.push(`intent:${input.queryPlan.intent.primary}`);
+    for (const sourceHint of input.queryPlan.intent.sourceHints) {
+      reasons.push(`source_hint:${sourceHint}`);
+    }
+    if (sourceRouteFilter !== undefined) {
+      reasons.push("source_hint_filter_applied");
+    }
+    if (sourceRoutePreference !== undefined) {
+      reasons.push("source_hint_preference_applied");
+    }
     if (input.parallel) {
       reasons.push("parallel_query_budget");
     } else {
@@ -242,8 +285,15 @@ export class DefaultRetrievalBudgetPolicy implements RetrievalBudgetPolicy {
       kind: input.plannedQuery.kind,
       enabled: true,
       topK,
-      fusionWeight: fusionWeight(input.plannedQuery, input.queryPlan.graphIntent.route),
+      fusionWeight: preferredFusionWeight(
+        fusionWeight(input.plannedQuery, input.queryPlan.graphIntent.route),
+        sourceRoutePreference
+      ),
       ...(candidatePoolLimit === undefined ? {} : { candidatePoolLimit }),
+      ...(sourceRouteFilter === undefined ? {} : { filter: sourceRouteFilter }),
+      ...(sourceRoutePreference === undefined ? {} : { prefer: sourceRoutePreference }),
+      primaryIntent: input.queryPlan.intent.primary,
+      sourceHintHashes: input.queryPlan.intent.sourceHints.map(hashText),
       ...(graph === undefined ? {} : { graph }),
       reasons
     };
@@ -276,6 +326,72 @@ function fusionWeight(query: PlannedQuery, route: GraphQueryRoute): number {
   }
 
   return query.weight;
+}
+
+function preferredFusionWeight(
+  baseWeight: number,
+  preference: RetrievalBranchPreference | undefined
+): number {
+  if (preference === undefined) {
+    return baseWeight;
+  }
+
+  return Math.min(baseWeight * preference.fusionWeightMultiplier, 1.5);
+}
+
+function sourceHintRouteFilter(
+  profile: RagProfile,
+  sourceHints: readonly string[]
+): RetrievalBranchFilter | undefined {
+  const routes = sourceHints
+    .map((hint) => profile.retrieval.sourceHintRoutes?.[hint])
+    .filter(
+      (route): route is NonNullable<typeof route> => route !== undefined && route.mode === "filter"
+    );
+
+  if (routes.length === 0) {
+    return undefined;
+  }
+
+  const sourceIds = uniqueValues(routes.flatMap((route) => route.sourceIds ?? []));
+  const sourceKinds = uniqueValues(routes.flatMap((route) => route.sourceKinds ?? []));
+  const trustTiers = uniqueValues(routes.flatMap((route) => route.trustTiers ?? []));
+
+  return {
+    ...(sourceIds.length === 0 ? {} : { sourceIds }),
+    ...(sourceKinds.length === 0 ? {} : { sourceKinds }),
+    ...(trustTiers.length === 0 ? {} : { trustTiers })
+  };
+}
+
+function sourceHintRoutePreference(
+  profile: RagProfile,
+  sourceHints: readonly string[]
+): RetrievalBranchPreference | undefined {
+  const routes = sourceHints
+    .map((hint) => profile.retrieval.sourceHintRoutes?.[hint])
+    .filter(
+      (route): route is NonNullable<typeof route> => route !== undefined && route.mode === "prefer"
+    );
+
+  if (routes.length === 0) {
+    return undefined;
+  }
+
+  const sourceIds = uniqueValues(routes.flatMap((route) => route.sourceIds ?? []));
+  const sourceKinds = uniqueValues(routes.flatMap((route) => route.sourceKinds ?? []));
+  const trustTiers = uniqueValues(routes.flatMap((route) => route.trustTiers ?? []));
+
+  return {
+    ...(sourceIds.length === 0 ? {} : { sourceIds }),
+    ...(sourceKinds.length === 0 ? {} : { sourceKinds }),
+    ...(trustTiers.length === 0 ? {} : { trustTiers }),
+    fusionWeightMultiplier: 1.15
+  };
+}
+
+function uniqueValues<Value extends string>(values: readonly Value[]): readonly Value[] {
+  return [...new Set(values)].sort();
 }
 
 function graphControls(input: {

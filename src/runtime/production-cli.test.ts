@@ -14,6 +14,11 @@ import { buildRagSupportEventIdempotencyLedger } from "../support-bridge/idempot
 import { buildRagSupportKnowledgeCandidateQueue } from "../support-bridge/knowledge-candidate-queue.js";
 import { buildRagSupportEvent } from "../support-bridge/support-event.js";
 import { makeIndexedFixture } from "../test-support/fixtures.js";
+import {
+  InMemoryIndexGenerationStore,
+  InMemoryIngestionJobQueue,
+  InMemoryIngestionLeaseStore
+} from "./ingestion-scale.js";
 import { runProductionRagCli } from "./production-cli.js";
 import type {
   ProductionRagAnswerInput,
@@ -21,6 +26,10 @@ import type {
   ProductionRagApp,
   ProductionRagAppConfig
 } from "./production-app.js";
+import type {
+  ProductionRagIngestInput,
+  ProductionRagIngestResponse
+} from "./production-ingestion.js";
 import { InMemorySourceSyncLedgerStore } from "../sync/sync-ledger.js";
 
 const CLI_TEST_ENV = {
@@ -99,6 +108,73 @@ function fakeApp(
       skippedCount: 0,
       checks: []
     })
+  };
+}
+
+function fakeIngestResponse(input: ProductionRagIngestInput): ProductionRagIngestResponse {
+  return {
+    status: "completed",
+    runId: input.runId ?? "fake_ingest_run",
+    startedAt: input.requestedAt ?? "2026-06-24T00:01:00.000Z",
+    finishedAt: "2026-06-24T00:01:01.000Z",
+    loadedSourceIds: input.sourceIds ?? [],
+    counts: {
+      documentsAccepted: 1,
+      chunksAccepted: 1,
+      recordsRejected: 0,
+      indexWritesAccepted: 1,
+      indexWritesRejected: 0,
+      adapterWarnings: 0,
+      normalizationIssues: 0,
+      parserQualityWarnings: 0,
+      searchableArtifactWarnings: 0,
+      chunkingWarnings: 0,
+      integrityErrors: 0,
+      integrityWarnings: 0
+    },
+    index: {
+      storageKind: "memory",
+      durable: false,
+      documentCount: 1,
+      chunkCount: 1
+    },
+    parserQuality: {} as ProductionRagIngestResponse["parserQuality"],
+    integrity: {} as ProductionRagIngestResponse["integrity"],
+    warnings: {
+      adapter: [],
+      normalization: [],
+      parserQuality: [],
+      searchableArtifacts: [],
+      chunking: [],
+      index: [],
+      embedding: [],
+      visualEmbedding: []
+    },
+    artifacts: {
+      documents: [
+        {
+          id: "doc_raw",
+          namespaceId: input.namespaceId ?? "test-namespace",
+          title: "Raw Artifact",
+          body: "worker raw artifact body",
+          provenance: {
+            sourceId: input.sourceIds?.[0] ?? "source",
+            sourceKind: "local_file",
+            title: "Raw Artifact",
+            ingestedAt: input.requestedAt ?? "2026-06-24T00:01:00.000Z",
+            capturedAt: input.requestedAt ?? "2026-06-24T00:01:00.000Z",
+            trustTier: "trusted_internal",
+            sensitivity: "internal",
+            checksum: "checksum"
+          },
+          accessScope: {
+            tenantId: input.tenantId,
+            namespaceId: input.namespaceId ?? "test-namespace"
+          }
+        }
+      ],
+      chunks: []
+    }
   };
 }
 
@@ -229,6 +305,165 @@ test("production CLI exposes health ready metrics and doctor commands", async ()
       assert.equal(parsed.status, "passed");
       assert.notEqual(parsed.selfTest, undefined);
     }
+  }
+});
+
+test("production CLI exposes file-backed inspect commands", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "rag-cli-inspect-"));
+  await writeFile(
+    path.join(tmp, "trace.json"),
+    JSON.stringify({
+      runId: "run_1",
+      traceId: "trace_1",
+      profileId: "profile_1",
+      namespaceId: "namespace_1",
+      startedAt: "2026-06-24T00:00:00.000Z",
+      finishedAt: "2026-06-24T00:00:01.000Z",
+      status: "succeeded",
+      plannedQueryHashes: ["hash_query"],
+      retrievedChunkIds: ["chunk_policy"],
+      rejectedChunkIds: ["chunk_denied"],
+      finalCitations: [
+        {
+          chunkId: "chunk_policy",
+          sourceId: "source_policy",
+          title: "Refund Policy"
+        }
+      ],
+      safetyFlags: [],
+      events: [
+        {
+          kind: "run_started",
+          at: "2026-06-24T00:00:00.000Z",
+          message: "Run started."
+        }
+      ]
+    }),
+    "utf8"
+  );
+  await writeFile(
+    path.join(tmp, "context.json"),
+    JSON.stringify({
+      blocks: [
+        {
+          index: 0,
+          chunkId: "chunk_policy",
+          documentId: "doc_policy",
+          citation: {
+            chunkId: "chunk_policy",
+            sourceId: "source_policy",
+            title: "Refund Policy"
+          },
+          provenance: {
+            sourceId: "source_policy",
+            sourceKind: "local_file",
+            trustTier: "trusted_internal"
+          }
+        }
+      ],
+      rejected: [
+        {
+          chunkId: "chunk_stale",
+          documentId: "doc_stale",
+          code: "stale_source",
+          reason: "Source freshness policy rejected this chunk."
+        }
+      ]
+    }),
+    "utf8"
+  );
+  await writeFile(
+    path.join(tmp, "summary.json"),
+    JSON.stringify({
+      passed: false,
+      suiteCount: 1,
+      caseCount: 1,
+      failures: ["case_failed failed: citation precision too low"],
+      suites: [
+        {
+          profileId: "profile_1",
+          namespaceId: "namespace_1",
+          passed: false,
+          requiredChecks: ["citation_required"],
+          coveredChecks: ["citation_required"],
+          missingRequiredChecks: [],
+          caseCount: 1,
+          failures: ["case_failed failed: citation precision too low"],
+          cases: [
+            {
+              id: "case_failed",
+              setKind: "golden",
+              checks: ["citation_required"],
+              passed: false,
+              failures: ["citation precision too low"],
+              retrievedDocumentIds: ["doc_policy"],
+              finalCitationCount: 1
+            }
+          ]
+        }
+      ]
+    }),
+    "utf8"
+  );
+
+  const runInspect = async (argv: readonly string[]): Promise<unknown> => {
+    const stdout: string[] = [];
+    const exitCode = await runProductionRagCli({
+      argv,
+      cwd: tmp,
+      stdout: (line) => stdout.push(line),
+      stderr: () => undefined,
+      appFactory: () => {
+        throw new Error("inspect commands should not build the production app.");
+      }
+    });
+    assert.equal(exitCode, 0);
+    return JSON.parse(stdout[0] ?? "{}") as unknown;
+  };
+
+  const trace = (await runInspect(["inspect-trace", "--trace", "trace.json"])) as {
+    readonly traceId?: string;
+    readonly eventCount?: number;
+  };
+  const citation = (await runInspect([
+    "inspect-citation",
+    "--context",
+    "context.json",
+    "--chunk-id",
+    "chunk_policy"
+  ])) as {
+    readonly citations?: readonly {
+      readonly chunkId?: string;
+      readonly contextBlockIndex?: number;
+    }[];
+  };
+  const evalFailure = (await runInspect(["inspect-eval-failure", "--summary", "summary.json"])) as {
+    readonly failureCount?: number;
+    readonly cases?: readonly { readonly caseId?: string }[];
+  };
+
+  assert.equal(trace.traceId, "trace_1");
+  assert.equal(trace.eventCount, 1);
+  assert.equal(citation.citations?.[0]?.chunkId, "chunk_policy");
+  assert.equal(citation.citations?.[0]?.contextBlockIndex, 0);
+  assert.equal(evalFailure.failureCount, 1);
+  assert.equal(evalFailure.cases?.[0]?.caseId, "case_failed");
+});
+
+test("production CLI requires postgres storage for ingestion inspection", async () => {
+  for (const command of ["inspect-ingestion-jobs", "inspect-ingestion-job"]) {
+    const stderr: string[] = [];
+    const exitCode = await runProductionRagCli({
+      argv: command === "inspect-ingestion-job" ? [command, "--job-id", "job_1"] : [command],
+      stdout: () => undefined,
+      stderr: (line) => stderr.push(line),
+      appFactory: () => {
+        throw new Error("ingestion inspection should not build the production app.");
+      }
+    });
+
+    assert.equal(exitCode, 1);
+    assert.equal(stderr[0]?.includes("postgres index storage"), true);
   }
 });
 
@@ -915,6 +1150,610 @@ test("production CLI ingests approved knowledge ledger config from env", async (
   assert.equal(result.counts?.chunksAccepted, 1);
   assert.equal(result.counts?.recordsRejected, 0);
   assert.equal(stdout.join("\n").includes(artifact.body), false);
+});
+
+test("production CLI worker processes queued ingestion jobs with injected stores", async () => {
+  const queue = new InMemoryIngestionJobQueue();
+  const leaseStore = new InMemoryIngestionLeaseStore();
+  await queue.enqueue({
+    queueId: "queue_policy",
+    jobId: "job_policy",
+    runId: "run_policy",
+    tenantId: "tenant_1",
+    namespaceId: "test-namespace",
+    sourceIds: ["policy_docs"],
+    enqueuedAt: "2026-06-24T00:00:00.000Z"
+  });
+  await queue.enqueue({
+    queueId: "queue_help",
+    jobId: "job_help",
+    runId: "run_help",
+    tenantId: "tenant_1",
+    namespaceId: "test-namespace",
+    sourceIds: ["help_docs"],
+    enqueuedAt: "2026-06-24T00:00:00.000Z"
+  });
+
+  const ingestInputs: ProductionRagIngestInput[] = [];
+  const stdout: string[] = [];
+  const exitCode = await runProductionRagCli({
+    argv: [
+      "worker",
+      "--max-jobs",
+      "3",
+      "--worker-id",
+      "worker_cli",
+      "--tenant-id",
+      "tenant_1",
+      "--namespace-id",
+      "test-namespace",
+      "--overwrite",
+      "replace",
+      "--user-id",
+      "worker_user",
+      "--principal-namespace-id",
+      "test-namespace",
+      "--role",
+      "ingestion-worker",
+      "--heartbeat-interval-ms",
+      "0",
+      "--requested-at",
+      "2026-06-24T00:01:00.000Z"
+    ],
+    env: CLI_TEST_ENV,
+    stdout: (line) => stdout.push(line),
+    stderr: () => undefined,
+    appFactory: (config) => fakeApp(config),
+    workerQueue: queue,
+    workerLeaseStore: leaseStore,
+    ingestRuntimeFactory: () => ({
+      ingest: async (input) => {
+        ingestInputs.push(input);
+        return fakeIngestResponse(input);
+      }
+    }),
+    now: () => "2026-06-24T00:02:00.000Z"
+  });
+
+  const result = JSON.parse(stdout[0] ?? "{}") as {
+    readonly workerId?: string;
+    readonly attemptedCount?: number;
+    readonly completedCount?: number;
+    readonly idleCount?: number;
+    readonly results?: readonly {
+      readonly status?: string;
+      readonly queueJob?: { readonly queueId?: string; readonly status?: string };
+      readonly ingestion?: {
+        readonly runId?: string;
+        readonly loadedSourceIds?: readonly string[];
+        readonly artifacts?: unknown;
+      };
+    }[];
+  };
+
+  assert.equal(exitCode, 0);
+  assert.equal(result.workerId, "worker_cli");
+  assert.equal(result.attemptedCount, 2);
+  assert.equal(result.completedCount, 2);
+  assert.equal(result.idleCount, 1);
+  assert.deepEqual(
+    ingestInputs
+      .map((input) => ({
+        tenantId: input.tenantId,
+        namespaceId: input.namespaceId,
+        sourceIds: input.sourceIds,
+        runId: input.runId,
+        overwriteMode: input.overwriteMode
+      }))
+      .sort((left, right) => String(left.runId).localeCompare(String(right.runId))),
+    [
+      {
+        tenantId: "tenant_1",
+        namespaceId: "test-namespace",
+        sourceIds: ["help_docs"],
+        runId: "run_help",
+        overwriteMode: "replace"
+      },
+      {
+        tenantId: "tenant_1",
+        namespaceId: "test-namespace",
+        sourceIds: ["policy_docs"],
+        runId: "run_policy",
+        overwriteMode: "replace"
+      }
+    ]
+  );
+  assert.equal(result.results?.[0]?.queueJob?.status, "completed");
+  assert.deepEqual(
+    result.results
+      ?.filter((job) => job.status === "completed")
+      .flatMap((job) => job.ingestion?.loadedSourceIds ?? [])
+      .sort(),
+    ["help_docs", "policy_docs"]
+  );
+  assert.equal(
+    result.results?.some((job) => job.ingestion?.artifacts !== undefined),
+    false
+  );
+  assert.equal(stdout.join("\n").includes("worker raw artifact body"), false);
+});
+
+test("production CLI enqueues backfill ingestion batches", async () => {
+  const queue = new InMemoryIngestionJobQueue();
+  const stdout: string[] = [];
+  const exitCode = await runProductionRagCli({
+    argv: [
+      "enqueue-ingestion",
+      "--plan-id",
+      "plan_backfill",
+      "--tenant-id",
+      "tenant_1",
+      "--namespace-id",
+      "test-namespace",
+      "--source-id",
+      "policy_docs",
+      "--source-id",
+      "help_docs",
+      "--source-id",
+      "faq_docs",
+      "--batch-size",
+      "2",
+      "--priority",
+      "7",
+      "--max-attempts",
+      "4",
+      "--available-at",
+      "2026-06-24T00:05:00.000Z",
+      "--metadata",
+      "reason=quarterly_backfill"
+    ],
+    env: CLI_TEST_ENV,
+    stdout: (line) => stdout.push(line),
+    stderr: () => undefined,
+    appFactory: (config) => fakeApp(config),
+    workerQueue: queue,
+    now: () => "2026-06-24T00:00:00.000Z"
+  });
+
+  const result = JSON.parse(stdout[0] ?? "{}") as {
+    readonly mode?: string;
+    readonly dryRun?: boolean;
+    readonly plannedJobCount?: number;
+    readonly enqueuedJobCount?: number;
+    readonly plannedJobs?: readonly {
+      readonly queueId?: string;
+      readonly sourceIds?: readonly string[];
+      readonly priority?: number;
+      readonly maxAttempts?: number;
+      readonly availableAt?: string;
+      readonly metadata?: Record<string, unknown>;
+    }[];
+    readonly enqueuedJobs?: readonly { readonly status?: string }[];
+  };
+  const queued = await queue.list();
+
+  assert.equal(exitCode, 0);
+  assert.equal(result.mode, "backfill");
+  assert.equal(result.dryRun, false);
+  assert.equal(result.plannedJobCount, 2);
+  assert.equal(result.enqueuedJobCount, 2);
+  assert.equal(result.plannedJobs?.[0]?.queueId, "plan_backfill_queue_1");
+  assert.deepEqual(result.plannedJobs?.[0]?.sourceIds, ["policy_docs", "help_docs"]);
+  assert.equal(result.plannedJobs?.[0]?.priority, 7);
+  assert.equal(result.plannedJobs?.[0]?.maxAttempts, 4);
+  assert.equal(result.plannedJobs?.[0]?.availableAt, "2026-06-24T00:05:00.000Z");
+  assert.equal(result.plannedJobs?.[0]?.metadata?.reason, "quarterly_backfill");
+  assert.deepEqual(
+    queued.map((job) => [job.queueId, job.status, job.sourceIds]),
+    [
+      ["plan_backfill_queue_1", "queued", ["policy_docs", "help_docs"]],
+      ["plan_backfill_queue_2", "queued", ["faq_docs"]]
+    ]
+  );
+  assert.equal(
+    result.enqueuedJobs?.every((job) => job.status === "queued"),
+    true
+  );
+});
+
+test("production CLI dry-runs reindex queue plans with generation promotion metadata", async () => {
+  const stdout: string[] = [];
+  const exitCode = await runProductionRagCli({
+    argv: [
+      "enqueue-ingestion",
+      "--mode",
+      "reindex",
+      "--dry-run",
+      "true",
+      "--plan-id",
+      "plan_reindex",
+      "--tenant-id",
+      "tenant_1",
+      "--namespace-id",
+      "test-namespace",
+      "--source-id",
+      "policy_docs",
+      "--batch-size",
+      "1",
+      "--generation-id",
+      "gen_candidate",
+      "--active-generation-id",
+      "gen_active",
+      "--profile-id",
+      "test-profile",
+      "--embedding-provider",
+      "openai",
+      "--embedding-model",
+      "text-embedding-3-large",
+      "--embedding-dimensions",
+      "3072",
+      "--embedding-config-hash",
+      "embedding_cfg_hash",
+      "--embedding-index-config-hash",
+      "index_cfg_hash",
+      "--chunking-policy-id",
+      "default-chunking",
+      "--chunking-policy-version",
+      "2",
+      "--required-eval-id",
+      "retrieval_regression",
+      "--metadata",
+      "operator=search-team"
+    ],
+    env: CLI_TEST_ENV,
+    stdout: (line) => stdout.push(line),
+    stderr: () => undefined,
+    appFactory: (config) => fakeApp(config),
+    now: () => "2026-06-24T00:00:00.000Z"
+  });
+
+  const result = JSON.parse(stdout[0] ?? "{}") as {
+    readonly mode?: string;
+    readonly dryRun?: boolean;
+    readonly plannedJobCount?: number;
+    readonly enqueuedJobCount?: number;
+    readonly candidateGeneration?: {
+      readonly generationId?: string;
+      readonly embeddingDimensions?: number;
+    };
+    readonly promotion?: {
+      readonly candidateGenerationId?: string;
+      readonly previousActiveGenerationId?: string;
+      readonly requiredEvalIds?: readonly string[];
+      readonly actions?: readonly string[];
+    };
+    readonly plannedJobs?: readonly {
+      readonly metadata?: Record<string, unknown>;
+    }[];
+  };
+
+  assert.equal(exitCode, 0);
+  assert.equal(result.mode, "reindex");
+  assert.equal(result.dryRun, true);
+  assert.equal(result.plannedJobCount, 1);
+  assert.equal(result.enqueuedJobCount, 0);
+  assert.equal(result.candidateGeneration?.generationId, "gen_candidate");
+  assert.equal(result.candidateGeneration?.embeddingDimensions, 3072);
+  assert.equal(result.promotion?.candidateGenerationId, "gen_candidate");
+  assert.equal(result.promotion?.previousActiveGenerationId, "gen_active");
+  assert.deepEqual(result.promotion?.requiredEvalIds, ["retrieval_regression"]);
+  assert.deepEqual(result.promotion?.actions, [
+    "validate_candidate_generation",
+    "run_required_evals",
+    "switch_active_generation",
+    "mark_previous_generation_deprecated"
+  ]);
+  assert.equal(result.plannedJobs?.[0]?.metadata?.operator, "search-team");
+  assert.equal(result.plannedJobs?.[0]?.metadata?.reindexGenerationId, "gen_candidate");
+});
+
+test("production CLI inspects, cancels, and requeues ingestion queue jobs without building the app", async () => {
+  const queue = new InMemoryIngestionJobQueue();
+  await queue.enqueue({
+    queueId: "queue_cancel",
+    jobId: "job_cancel",
+    tenantId: "tenant_1",
+    namespaceId: "test-namespace",
+    sourceIds: ["cancel_docs"],
+    enqueuedAt: "2026-06-24T00:00:00.000Z"
+  });
+  await queue.enqueue({
+    queueId: "queue_dead",
+    jobId: "job_dead",
+    tenantId: "tenant_1",
+    namespaceId: "test-namespace",
+    sourceIds: ["dead_docs"],
+    maxAttempts: 1,
+    enqueuedAt: "2026-06-24T00:00:00.000Z"
+  });
+  await queue.claimNext({
+    workerId: "worker_cli",
+    now: "2026-06-24T00:00:30.000Z",
+    leaseTtlMs: 60_000,
+    sourceIds: ["dead_docs"]
+  });
+  await queue.fail({
+    queueId: "queue_dead",
+    workerId: "worker_cli",
+    now: "2026-06-24T00:01:00.000Z",
+    retryable: true,
+    errorName: "ProviderError",
+    errorMessage: "Provider unavailable."
+  });
+
+  const runQueueCommand = async (argv: readonly string[]): Promise<unknown> => {
+    const stdout: string[] = [];
+    const exitCode = await runProductionRagCli({
+      argv,
+      env: CLI_TEST_ENV,
+      stdout: (line) => stdout.push(line),
+      stderr: () => undefined,
+      appFactory: () => {
+        throw new Error("queue control commands should not build the production app.");
+      },
+      workerQueue: queue,
+      now: () => "2026-06-24T00:02:00.000Z"
+    });
+    assert.equal(exitCode, 0);
+    return JSON.parse(stdout[0] ?? "{}") as unknown;
+  };
+
+  const inspected = (await runQueueCommand([
+    "inspect-ingestion-queue",
+    "--tenant-id",
+    "tenant_1",
+    "--namespace-id",
+    "test-namespace",
+    "--status",
+    "dead_letter"
+  ])) as {
+    readonly count?: number;
+    readonly jobs?: readonly { readonly queueId?: string; readonly status?: string }[];
+  };
+  const cancelled = (await runQueueCommand([
+    "cancel-ingestion-queue-job",
+    "--queue-id",
+    "queue_cancel",
+    "--reason",
+    "Duplicate backfill request.",
+    "--requested-at",
+    "2026-06-24T00:02:30.000Z"
+  ])) as {
+    readonly status?: string;
+    readonly queueJob?: {
+      readonly queueId?: string;
+      readonly status?: string;
+      readonly errorMessage?: string;
+    };
+  };
+  const requeued = (await runQueueCommand([
+    "requeue-ingestion-queue-job",
+    "--queue-id",
+    "queue_dead",
+    "--available-at",
+    "2026-06-24T00:05:00.000Z",
+    "--max-attempts",
+    "3",
+    "--reason",
+    "Provider recovered.",
+    "--metadata",
+    "operator=search-team",
+    "--requested-at",
+    "2026-06-24T00:03:00.000Z"
+  ])) as {
+    readonly status?: string;
+    readonly queueJob?: {
+      readonly queueId?: string;
+      readonly status?: string;
+      readonly attempt?: number;
+      readonly maxAttempts?: number;
+      readonly availableAt?: string;
+      readonly metadata?: Record<string, unknown>;
+      readonly errorName?: string;
+    };
+  };
+
+  assert.equal(inspected.count, 1);
+  assert.equal(inspected.jobs?.[0]?.queueId, "queue_dead");
+  assert.equal(cancelled.status, "cancelled");
+  assert.equal(cancelled.queueJob?.status, "cancelled");
+  assert.equal(cancelled.queueJob?.errorMessage, "Duplicate backfill request.");
+  assert.equal(requeued.status, "requeued");
+  assert.equal(requeued.queueJob?.status, "queued");
+  assert.equal(requeued.queueJob?.attempt, 0);
+  assert.equal(requeued.queueJob?.maxAttempts, 3);
+  assert.equal(requeued.queueJob?.availableAt, "2026-06-24T00:05:00.000Z");
+  assert.equal(requeued.queueJob?.errorName, "ProviderError");
+  assert.equal(requeued.queueJob?.metadata?.operator, "search-team");
+  assert.equal(requeued.queueJob?.metadata?.requeueReason, "Provider recovered.");
+});
+
+test("production CLI controls generation promotions without building the app", async () => {
+  const generationStore = new InMemoryIndexGenerationStore();
+  await generationStore.saveManifest({
+    manifest: {
+      generationId: "gen_active",
+      tenantId: "tenant_1",
+      namespaceId: "test-namespace",
+      profileId: "test-profile",
+      status: "active",
+      embeddingProvider: "openai",
+      embeddingModel: "text-embedding-3-large",
+      embeddingDimensions: 3072,
+      embeddingConfigHash: "active_embedding_cfg_hash",
+      embeddingIndexConfigHash: "active_index_cfg_hash",
+      chunkingPolicyId: "default-chunking",
+      chunkingPolicyVersion: 1,
+      createdAt: "2026-06-23T00:00:00.000Z",
+      promotedAt: "2026-06-23T00:00:00.000Z"
+    },
+    savedAt: "2026-06-23T00:00:00.000Z"
+  });
+
+  const runGenerationCommand = async (argv: readonly string[]): Promise<unknown> => {
+    const stdout: string[] = [];
+    const exitCode = await runProductionRagCli({
+      argv,
+      env: CLI_TEST_ENV,
+      stdout: (line) => stdout.push(line),
+      stderr: () => undefined,
+      appFactory: () => {
+        throw new Error("generation promotion commands should not build the production app.");
+      },
+      indexGenerationStore: generationStore,
+      now: () => "2026-06-24T00:00:00.000Z"
+    });
+    assert.equal(exitCode, 0);
+    return JSON.parse(stdout[0] ?? "{}") as unknown;
+  };
+
+  const planArgs = [
+    "plan-generation-promotion",
+    "--promotion-id",
+    "promotion_1",
+    "--tenant-id",
+    "tenant_1",
+    "--namespace-id",
+    "test-namespace",
+    "--profile-id",
+    "test-profile",
+    "--generation-id",
+    "gen_candidate",
+    "--embedding-provider",
+    "openai",
+    "--embedding-model",
+    "text-embedding-3-large",
+    "--embedding-dimensions",
+    "3072",
+    "--embedding-config-hash",
+    "candidate_embedding_cfg_hash",
+    "--embedding-index-config-hash",
+    "candidate_index_cfg_hash",
+    "--chunking-policy-id",
+    "default-chunking",
+    "--chunking-policy-version",
+    "2",
+    "--required-eval-id",
+    "retrieval_regression",
+    "--required-eval-id",
+    "citation_regression",
+    "--requested-at",
+    "2026-06-24T00:00:00.000Z"
+  ] as const;
+
+  const savedPlan = (await runGenerationCommand(planArgs)) as {
+    readonly status?: string;
+    readonly dryRun?: boolean;
+    readonly candidateGeneration?: { readonly generationId?: string };
+    readonly activeGeneration?: { readonly generationId?: string };
+    readonly promotion?: {
+      readonly promotionId?: string;
+      readonly status?: string;
+      readonly previousActiveGenerationId?: string;
+      readonly requiredEvalIds?: readonly string[];
+    };
+  };
+  const inspectedCandidates = (await runGenerationCommand([
+    "inspect-index-generations",
+    "--tenant-id",
+    "tenant_1",
+    "--namespace-id",
+    "test-namespace",
+    "--generation-status",
+    "candidate"
+  ])) as {
+    readonly count?: number;
+    readonly manifests?: readonly { readonly generationId?: string; readonly status?: string }[];
+  };
+  const inspectedPromotion = (await runGenerationCommand([
+    "inspect-generation-promotion",
+    "--promotion-id",
+    "promotion_1"
+  ])) as {
+    readonly promotionId?: string;
+    readonly status?: string;
+    readonly requiredEvalIds?: readonly string[];
+  };
+
+  const partial = (await runGenerationCommand([
+    "record-generation-eval",
+    "--promotion-id",
+    "promotion_1",
+    "--eval-id",
+    "retrieval_regression",
+    "--eval-status",
+    "passed",
+    "--recorded-at",
+    "2026-06-24T00:01:00.000Z"
+  ])) as { readonly status?: string };
+  const ready = (await runGenerationCommand([
+    "record-generation-eval",
+    "--promotion-id",
+    "promotion_1",
+    "--eval-id",
+    "citation_regression",
+    "--eval-status",
+    "passed",
+    "--report-uri",
+    "s3://evals/citation.json",
+    "--summary",
+    "Citation regression passed.",
+    "--recorded-at",
+    "2026-06-24T00:02:00.000Z"
+  ])) as {
+    readonly status?: string;
+    readonly evalResults?: readonly { readonly evalId?: string; readonly reportUri?: string }[];
+  };
+  const promoted = (await runGenerationCommand([
+    "promote-generation",
+    "--promotion-id",
+    "promotion_1",
+    "--promoted-at",
+    "2026-06-24T00:05:00.000Z"
+  ])) as {
+    readonly status?: string;
+    readonly promotedAt?: string;
+  };
+
+  assert.equal(savedPlan.status, "saved");
+  assert.equal(savedPlan.dryRun, false);
+  assert.equal(savedPlan.candidateGeneration?.generationId, "gen_candidate");
+  assert.equal(savedPlan.activeGeneration?.generationId, "gen_active");
+  assert.equal(savedPlan.promotion?.promotionId, "promotion_1");
+  assert.equal(savedPlan.promotion?.status, "planned");
+  assert.equal(savedPlan.promotion?.previousActiveGenerationId, "gen_active");
+  assert.deepEqual(savedPlan.promotion?.requiredEvalIds, [
+    "retrieval_regression",
+    "citation_regression"
+  ]);
+  assert.equal(inspectedCandidates.count, 1);
+  assert.equal(inspectedCandidates.manifests?.[0]?.generationId, "gen_candidate");
+  assert.equal(inspectedCandidates.manifests?.[0]?.status, "candidate");
+  assert.equal(inspectedPromotion.promotionId, "promotion_1");
+  assert.equal(inspectedPromotion.status, "planned");
+  assert.deepEqual(inspectedPromotion.requiredEvalIds, [
+    "retrieval_regression",
+    "citation_regression"
+  ]);
+  assert.equal(partial.status, "planned");
+  assert.equal(ready.status, "ready");
+  assert.equal(ready.evalResults?.[1]?.evalId, "retrieval_regression");
+  assert.equal(
+    ready.evalResults?.find((result) => result.evalId === "citation_regression")?.reportUri,
+    "s3://evals/citation.json"
+  );
+  assert.equal(promoted.status, "promoted");
+  assert.equal(promoted.promotedAt, "2026-06-24T00:05:00.000Z");
+  assert.equal(
+    (
+      await generationStore.getActiveManifest({
+        tenantId: "tenant_1",
+        namespaceId: "test-namespace"
+      })
+    )?.generationId,
+    "gen_candidate"
+  );
+  assert.equal((await generationStore.getManifest("gen_active"))?.status, "deprecated");
 });
 
 test("production CLI serve shuts down gracefully on SIGTERM", async () => {

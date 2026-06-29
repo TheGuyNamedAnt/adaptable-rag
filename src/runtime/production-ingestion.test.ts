@@ -105,6 +105,7 @@ test("loads local-files ingestion config from an env path", async () => {
           sourceId: "curated_docs",
           rootDir: "docs",
           recursive: true,
+          parserConcurrency: 4,
           sourceKind: "local_file",
           trustTier: "trusted_internal",
           sensitivity: "internal",
@@ -131,6 +132,7 @@ test("loads local-files ingestion config from an env path", async () => {
 
   assert.equal(config.localFiles.sources[0]?.sourceId, "curated_docs");
   assert.equal(config.localFiles.sources[0]?.rootDir, docsDir);
+  assert.equal(config.localFiles.sources[0]?.parserConcurrency, 4);
   assert.deepEqual(config.localFiles.sources[0]?.accessScope?.roles, ["admin"]);
 });
 
@@ -219,6 +221,35 @@ test("rejects invalid local-files source config before filesystem reads", async 
   );
 });
 
+test("rejects unsafe local-files parser concurrency in production config", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "rag-production-ingest-"));
+  const configPath = path.join(tempDir, "local-sources.json");
+  await writeFile(
+    configPath,
+    JSON.stringify({
+      sources: [
+        {
+          sourceId: "curated_docs",
+          rootDir: ".",
+          parserConcurrency: 64
+        }
+      ]
+    }),
+    "utf8"
+  );
+
+  assert.throws(
+    () =>
+      loadProductionIngestionConfigFromEnv({
+        env: {
+          RAG_LOCAL_FILES_SOURCES_PATH: configPath
+        },
+        cwd: tempDir
+      }),
+    /parserConcurrency/u
+  );
+});
+
 test("rejects duplicate local-files source ids in production config", async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "rag-production-ingest-"));
   const configPath = path.join(tempDir, "local-sources.json");
@@ -253,8 +284,9 @@ test("ingests local files through the production runtime and indexes vectors", a
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "rag-production-ingest-"));
   const docsDir = path.join(tempDir, "docs");
   await mkdir(docsDir);
+  const policyPath = path.join(docsDir, "policy.md");
   await writeFile(
-    path.join(docsDir, "policy.md"),
+    policyPath,
     "Production ingest policy body that must not be echoed in the ingest summary.",
     "utf8"
   );
@@ -322,6 +354,8 @@ test("ingests local files through the production runtime and indexes vectors", a
     ["accepted"]
   );
 
+  await writeFile(policyPath, `${"Updated production policy paragraph. ".repeat(140)}`, "utf8");
+
   const retry = await ingestion.ingest({
     tenantId: "tenant_1",
     namespaceId: profile.namespaceId,
@@ -333,6 +367,12 @@ test("ingests local files through the production runtime and indexes vectors", a
   });
   assert.equal(retry.status, "completed");
   assert.deepEqual((await jobStore.get("ingest_prod_test"))?.counts, retry.counts);
+  assert.ok(retry.counts.chunksAccepted > 1);
+  assert.equal(
+    retry.vector?.status === "indexed" ? retry.vector.vectorCount : 0,
+    retry.counts.chunksAccepted
+  );
+  assert.equal(vectorStore.vectorCount(), retry.counts.chunksAccepted);
 });
 
 test("IngestionJobRunner runs a production ingestion job directly", async () => {
@@ -421,14 +461,20 @@ test("production ingestion indexes layout relation vectors when embeddings are c
   });
 
   assert.equal(result.vector?.status, "indexed");
-  assert.equal(result.counts.chunksAccepted, 1);
-  assert.equal(result.vector?.status === "indexed" ? result.vector.indexedVectorCount : 0, 1);
+  assert.ok(result.counts.chunksAccepted >= 2);
+  assert.equal(
+    result.vector?.status === "indexed" ? result.vector.indexedVectorCount : 0,
+    result.counts.chunksAccepted
+  );
   assert.equal(result.vector?.status === "indexed" ? result.vector.candidateRelationCount : 0, 2);
   assert.equal(
     result.vector?.status === "indexed" ? result.vector.indexedRelationVectorCount : 0,
     2
   );
-  assert.equal(result.vector?.status === "indexed" ? result.vector.vectorCount : 0, 3);
+  assert.equal(
+    result.vector?.status === "indexed" ? result.vector.vectorCount : 0,
+    result.counts.chunksAccepted + 2
+  );
   assert.equal(JSON.stringify(result).includes("Parent LLC owns Child LLC"), false);
 });
 
@@ -472,11 +518,16 @@ test("production ingestion uses trusted parser extensions for parser-backed loca
   );
 
   assert.equal(result.counts.documentsAccepted, 1);
-  assert.equal(result.counts.chunksAccepted, 1);
+  assert.equal(result.counts.chunksAccepted, 4);
   assert.equal(result.counts.recordsRejected, 0);
-  assert.equal(chunks.length, 1);
-  assert.deepEqual(chunks[0]?.chunk.citation.layoutRegionIds, ["region_title", "region_body"]);
-  assert.equal(chunks[0]?.chunk.citation.boundingBoxes?.length, 2);
+  assert.equal(chunks.length, result.counts.chunksAccepted);
+  const layoutRegionIds = chunks.flatMap((chunk) => chunk.chunk.citation.layoutRegionIds ?? []);
+  assert.equal(layoutRegionIds.includes("region_title"), true);
+  assert.equal(layoutRegionIds.includes("region_body"), true);
+  assert.equal(
+    chunks.reduce((count, chunk) => count + (chunk.chunk.citation.boundingBoxes?.length ?? 0), 0),
+    7
+  );
   assert.equal(JSON.stringify(result).includes(parsedBody), false);
 });
 
@@ -534,12 +585,15 @@ test("production ingestion can register the DeepDoc parser from env", async () =
   );
 
   assert.equal(result.counts.documentsAccepted, 1);
-  assert.equal(result.counts.chunksAccepted, 1);
+  assert.equal(result.counts.chunksAccepted, 4);
   assert.equal(result.counts.recordsRejected, 0);
   assert.equal(result.counts.adapterWarnings, 0);
   assert.equal(transport.requests.length, 1);
   assert.equal(transport.requests[0]?.headers.authorization, "Bearer parser-secret");
-  assert.equal(chunks[0]?.chunk.citation.layoutRegionIds?.includes("region_title"), true);
+  assert.equal(
+    chunks.some((chunk) => chunk.chunk.citation.layoutRegionIds?.includes("region_title")),
+    true
+  );
   assert.equal(JSON.stringify(result).includes(parsedBody), false);
 });
 
@@ -678,11 +732,11 @@ test("production ingestion indexes parser-backed visual vectors when configured"
   assert.equal(result.visualVector?.status, "indexed");
   assert.equal(
     result.visualVector?.status === "indexed" ? result.visualVector.indexedVisualVectorCount : 0,
-    1
+    result.visualVector?.status === "indexed" ? result.visualVector.candidateChunkCount : 0
   );
   assert.equal(
     result.visualVector?.status === "indexed" ? result.visualVector.visualVectorCount : 0,
-    1
+    result.visualVector?.status === "indexed" ? result.visualVector.indexedVisualVectorCount : 0
   );
   assert.equal(result.warnings.visualEmbedding.length, 0);
   assert.equal(JSON.stringify(result).includes(parsedBody), false);

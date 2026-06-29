@@ -140,6 +140,8 @@ const VECTOR_METADATA_KEYS = [
   "namespaceId",
   "textHash",
   "embeddingModel",
+  "embeddingProvider",
+  "embeddingConfigHash",
   "embeddedAt",
   "dimensions"
 ] as const;
@@ -318,7 +320,8 @@ export class PineconeHostedVectorTransport implements HostedVectorStoreTransport
         includeMetadata: true,
         filter: {
           tenantId: { $eq: request.tenantId },
-          namespaceId: { $eq: request.namespaceId }
+          namespaceId: { $eq: request.namespaceId },
+          ...pineconeIdentityFilter(request)
         }
       }
     });
@@ -396,7 +399,8 @@ export class QdrantHostedVectorTransport implements HostedVectorStoreTransport {
         ...(this.vectorName ? { using: this.vectorName } : {}),
         filter: qdrantFilter([
           { key: "tenantId", value: request.tenantId },
-          { key: "namespaceId", value: request.namespaceId }
+          { key: "namespaceId", value: request.namespaceId },
+          ...hostedIdentityConditions(request)
         ]),
         limit: request.topK,
         with_vector: true,
@@ -491,7 +495,11 @@ export class WeaviateHostedVectorTransport implements HostedVectorStoreTransport
           limit: request.topK,
           tenant: this.tenant,
           tenantId: request.tenantId,
-          namespaceId: request.namespaceId
+          namespaceId: request.namespaceId,
+          identityConditions: hostedIdentityConditions(request).map((condition) => ({
+            path: [condition.key],
+            valueText: condition.value
+          }))
         })
       }
     });
@@ -597,7 +605,16 @@ export class PgVectorRpcHostedVectorTransport implements HostedVectorStoreTransp
         match_count: request.topK,
         match_threshold: request.minScore ?? 0,
         tenant_id: request.tenantId,
-        namespace_id: request.namespaceId
+        namespace_id: request.namespaceId,
+        ...(request.embeddingModel === undefined
+          ? {}
+          : { embedding_model: request.embeddingModel }),
+        ...(request.embeddingProvider === undefined
+          ? {}
+          : { embedding_provider: request.embeddingProvider }),
+        ...(request.embeddingConfigHash === undefined
+          ? {}
+          : { embedding_config_hash: request.embeddingConfigHash })
       }
     });
 
@@ -668,6 +685,12 @@ function metadataForVector(
     namespaceId: vector.namespaceId,
     textHash: vector.textHash,
     embeddingModel: vector.embeddingModel,
+    ...(vector.embeddingProvider === undefined
+      ? {}
+      : { embeddingProvider: vector.embeddingProvider }),
+    ...(vector.embeddingConfigHash === undefined
+      ? {}
+      : { embeddingConfigHash: vector.embeddingConfigHash }),
     embeddedAt: vector.embeddedAt,
     dimensions: vector.dimensions,
     indexedAt
@@ -691,6 +714,16 @@ function matchFromRemote(input: {
   const namespaceId = metadataString(input.metadata, "namespaceId", "namespace_id");
   const textHash = metadataString(input.metadata, "textHash", "text_hash");
   const embeddingModel = metadataString(input.metadata, "embeddingModel", "embedding_model");
+  const embeddingProvider = metadataString(
+    input.metadata,
+    "embeddingProvider",
+    "embedding_provider"
+  );
+  const embeddingConfigHash = metadataString(
+    input.metadata,
+    "embeddingConfigHash",
+    "embedding_config_hash"
+  );
   const embeddedAt = metadataString(input.metadata, "embeddedAt", "embedded_at");
   const dimensions = metadataNumber(input.metadata, "dimensions");
 
@@ -715,6 +748,8 @@ function matchFromRemote(input: {
     namespaceId,
     textHash,
     embeddingModel,
+    ...(embeddingProvider === undefined ? {} : { embeddingProvider }),
+    ...(embeddingConfigHash === undefined ? {} : { embeddingConfigHash }),
     embeddedAt,
     dimensions,
     vector: input.vector,
@@ -779,6 +814,30 @@ function qdrantFilter(
   };
 }
 
+function hostedIdentityConditions(
+  request: HostedVectorQueryRequest
+): readonly { readonly key: string; readonly value: string }[] {
+  return [
+    ...(request.embeddingModel === undefined
+      ? []
+      : [{ key: "embeddingModel", value: request.embeddingModel }]),
+    ...(request.embeddingProvider === undefined
+      ? []
+      : [{ key: "embeddingProvider", value: request.embeddingProvider }]),
+    ...(request.embeddingConfigHash === undefined
+      ? []
+      : [{ key: "embeddingConfigHash", value: request.embeddingConfigHash }])
+  ];
+}
+
+function pineconeIdentityFilter(
+  request: HostedVectorQueryRequest
+): Readonly<Record<string, { readonly $eq: string }>> {
+  return Object.fromEntries(
+    hostedIdentityConditions(request).map((condition) => [condition.key, { $eq: condition.value }])
+  );
+}
+
 function qdrantVector(
   point: Readonly<Record<string, unknown>>,
   vectorName: string | undefined
@@ -824,11 +883,16 @@ function weaviateQuery(input: {
   readonly tenant: string | undefined;
   readonly tenantId: string;
   readonly namespaceId: string;
+  readonly identityConditions: readonly {
+    readonly path: readonly string[];
+    readonly valueText: string;
+  }[];
 }): string {
   const where = JSON.stringify(
     weaviateWhere([
       { path: ["tenantId"], valueText: input.tenantId },
-      { path: ["namespaceId"], valueText: input.namespaceId }
+      { path: ["namespaceId"], valueText: input.namespaceId },
+      ...input.identityConditions
     ])
   ).replace(/"([^"]+)":/gu, "$1:");
   const tenantClause = input.tenant ? ` tenant: ${JSON.stringify(input.tenant)}` : "";
@@ -860,6 +924,10 @@ function pgVectorMetadata(
     namespaceId: stringField(row, "namespaceId") ?? stringField(row, "namespace_id"),
     textHash: stringField(row, "textHash") ?? stringField(row, "text_hash"),
     embeddingModel: stringField(row, "embeddingModel") ?? stringField(row, "embedding_model"),
+    embeddingProvider:
+      stringField(row, "embeddingProvider") ?? stringField(row, "embedding_provider"),
+    embeddingConfigHash:
+      stringField(row, "embeddingConfigHash") ?? stringField(row, "embedding_config_hash"),
     embeddedAt: stringField(row, "embeddedAt") ?? stringField(row, "embedded_at"),
     dimensions: numberField(row, "dimensions")
   };

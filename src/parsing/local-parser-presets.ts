@@ -3,7 +3,13 @@ import {
   type CommandLayoutParserCommand,
   type CommandLayoutParserRunner
 } from "./command-layout-parser.js";
+import {
+  CommandTextParser,
+  type CommandTextParserCommand,
+  type CommandTextParserRunner
+} from "./command-text-parser.js";
 import { DelimitedTableParser } from "./delimited-table-parser.js";
+import { MarkdownStructureParser } from "./markdown-structure-parser.js";
 import { DocumentParserRouter, type ParserRouterCandidate } from "./parser-router.js";
 import { PlainTextParser } from "./plain-text-parser.js";
 import { SecHtmlParser } from "./sec-html-parser.js";
@@ -12,7 +18,9 @@ import type { DocumentParser } from "./parser.js";
 export type LocalVisualParserEngine = "pdf_text" | "docling" | "mineru" | "paddleocr" | "custom";
 export type LocalStructuredParserEngine =
   | "delimited_table"
+  | "markdown_structure"
   | "sec_html"
+  | "markitdown_command"
   | "openpyxl_command"
   | "custom";
 
@@ -35,11 +43,11 @@ export interface LocalVisualParserConfig {
 
 export interface LocalStructuredParserConfig {
   readonly engine: LocalStructuredParserEngine;
-  readonly command?: CommandLayoutParserCommand;
+  readonly command?: CommandLayoutParserCommand | CommandTextParserCommand;
   readonly parserId?: string;
   readonly priority?: number;
   readonly maxBytes?: number;
-  readonly runner?: CommandLayoutParserRunner;
+  readonly runner?: CommandLayoutParserRunner | CommandTextParserRunner;
 }
 
 export interface LocalDocumentParserRouterOptions {
@@ -47,6 +55,7 @@ export interface LocalDocumentParserRouterOptions {
   readonly parserVersion?: string;
   readonly preset?: LocalDocumentParserPreset;
   readonly requireLayout?: boolean;
+  readonly requireLayoutContentTypes?: readonly string[];
   readonly preferTables?: boolean;
   readonly preferVisualAssets?: boolean;
   readonly minimumBodyCharacters?: number;
@@ -91,6 +100,9 @@ export function createLocalDocumentParserRouter(
     candidates,
     policy: {
       requireLayout: options.requireLayout ?? presetPolicy.requireLayout,
+      ...(options.requireLayoutContentTypes === undefined
+        ? {}
+        : { requireLayoutContentTypes: options.requireLayoutContentTypes }),
       preferTables: options.preferTables ?? presetPolicy.preferTables,
       preferVisualAssets: options.preferVisualAssets ?? presetPolicy.preferVisualAssets,
       minimumBodyCharacters: options.minimumBodyCharacters ?? 1,
@@ -104,14 +116,24 @@ export function createBestCombinedLocalParserRouter(
 ): DocumentParser {
   return createLocalDocumentParserRouter({
     preset: "balanced",
+    requireLayoutContentTypes: LAYOUT_RISK_CONTENT_TYPES,
+    preferTables: true,
     ...options
   });
 }
 
+const LAYOUT_RISK_CONTENT_TYPES = [
+  "application/pdf",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+] as const;
+
 export function defaultLocalStructuredParsers(): readonly LocalStructuredParserConfig[] {
   return [
     { engine: "delimited_table", priority: -20 },
+    { engine: "markdown_structure", priority: -18 },
     { engine: "sec_html", priority: -15 },
+    { engine: "markitdown_command", priority: -12 },
     { engine: "openpyxl_command", priority: -10 }
   ];
 }
@@ -189,6 +211,8 @@ export function localVisualParserCandidates(
       description: `${config.engine} local layout parser adapter.`,
       command: commandForLocalVisualParser(config),
       supportedContentTypes: supportedContentTypesForLocalVisualParser(config.engine),
+      emitsTables: emitsTablesForLocalVisualParser(config.engine),
+      emitsVisualAssets: emitsVisualAssetsForLocalVisualParser(config.engine),
       ...(config.maxBytes === undefined ? {} : { maxBytes: config.maxBytes }),
       ...(config.runner === undefined ? {} : { runner: config.runner })
     }),
@@ -228,17 +252,49 @@ export function localStructuredParserCandidates(
       };
     }
 
+    if (config.engine === "markdown_structure") {
+      return {
+        parser: new MarkdownStructureParser({
+          parserId: config.parserId ?? "markdown-structure-parser",
+          supportedContentTypes: ["text/markdown"],
+          ...(config.maxBytes === undefined ? {} : { maxBytes: config.maxBytes })
+        }),
+        tier: "fast_native",
+        priority: config.priority ?? -18,
+        requireLayout: true
+      };
+    }
+
+    if (config.engine === "markitdown_command") {
+      return {
+        parser: new CommandTextParser({
+          parserId: config.parserId ?? "markitdown-command-markdown-parser",
+          description: "MarkItDown local Markdown parser adapter.",
+          command: commandForLocalStructuredParser(config),
+          supportedContentTypes: supportedContentTypesForMarkItDownParser(),
+          ...(config.maxBytes === undefined ? {} : { maxBytes: config.maxBytes }),
+          ...(config.runner === undefined
+            ? {}
+            : { runner: config.runner as CommandTextParserRunner })
+        }),
+        tier: "fast_native",
+        priority: config.priority ?? -12
+      };
+    }
+
     return {
       parser: new CommandLayoutParser({
         parserId: config.parserId ?? `${config.engine}-structured-parser`,
         description: `${config.engine} local structured spreadsheet parser adapter.`,
-        command: commandForLocalStructuredParser(config),
+        command: commandForLocalStructuredParser(config) as CommandLayoutParserCommand,
         supportedContentTypes: [
           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
           "application/vnd.ms-excel.sheet.macroEnabled.12"
         ],
         ...(config.maxBytes === undefined ? {} : { maxBytes: config.maxBytes }),
-        ...(config.runner === undefined ? {} : { runner: config.runner })
+        ...(config.runner === undefined
+          ? {}
+          : { runner: config.runner as CommandLayoutParserRunner })
       }),
       tier: "fast_native",
       priority: config.priority ?? -10,
@@ -249,7 +305,7 @@ export function localStructuredParserCandidates(
 
 export function commandForLocalStructuredParser(
   config: LocalStructuredParserConfig
-): CommandLayoutParserCommand {
+): CommandLayoutParserCommand | CommandTextParserCommand {
   if (config.command) {
     return config.command;
   }
@@ -259,6 +315,14 @@ export function commandForLocalStructuredParser(
       throw new Error("Delimited table parser is built in and does not use a command.");
     case "sec_html":
       throw new Error("SEC HTML parser is built in and does not use a command.");
+    case "markdown_structure":
+      throw new Error("Markdown structure parser is built in and does not use a command.");
+    case "markitdown_command":
+      return {
+        executable: process.execPath,
+        args: ["scripts/markitdown-rag-parser.mjs"],
+        timeoutMs: 120_000
+      };
     case "openpyxl_command":
       return {
         executable: process.execPath,
@@ -268,6 +332,19 @@ export function commandForLocalStructuredParser(
     case "custom":
       throw new Error("Custom local structured parser requires a command.");
   }
+}
+
+function supportedContentTypesForMarkItDownParser(): readonly string[] {
+  return [
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/epub+zip",
+    "text/html",
+    "application/xhtml+xml",
+    "application/xml",
+    "text/xml",
+    "application/zip"
+  ];
 }
 
 function supportedContentTypesForLocalVisualParser(
@@ -285,6 +362,30 @@ function supportedContentTypesForLocalVisualParser(
     return ["application/pdf"];
   }
   return ["application/pdf", "image/*"];
+}
+
+function emitsTablesForLocalVisualParser(engine: LocalVisualParserEngine): boolean {
+  switch (engine) {
+    case "pdf_text":
+    case "paddleocr":
+      return false;
+    case "docling":
+    case "mineru":
+    case "custom":
+      return true;
+  }
+}
+
+function emitsVisualAssetsForLocalVisualParser(engine: LocalVisualParserEngine): boolean {
+  switch (engine) {
+    case "pdf_text":
+      return false;
+    case "docling":
+    case "mineru":
+    case "paddleocr":
+    case "custom":
+      return true;
+  }
 }
 
 export function commandForLocalVisualParser(

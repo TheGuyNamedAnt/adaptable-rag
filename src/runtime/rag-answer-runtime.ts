@@ -17,6 +17,7 @@ import { mergeCandidatesByRrf } from "../retrieval/rrf.js";
 import type {
   RetrievalCandidate,
   RetrievalBudgetTrace,
+  RetrievalFreshnessTrace,
   RetrievalGraphBudgetTraceControls,
   RetrievalGraphRequestControls,
   RetrievalRejection,
@@ -242,6 +243,10 @@ export class RagAnswerRuntime {
       queryHashes: queryPlan.trace.plannedQueryHashes,
       lowLevelKeywordHashes: queryPlan.trace.lowLevelKeywordHashes,
       highLevelKeywordHashes: queryPlan.trace.highLevelKeywordHashes,
+      primaryIntent: queryPlan.trace.primaryIntent,
+      secondaryIntentHashes: queryPlan.trace.secondaryIntentHashes,
+      sourceHintHashes: queryPlan.trace.sourceHintHashes,
+      intentConfidence: queryPlan.trace.intentConfidence,
       graphRoute: queryPlan.trace.graphRoute,
       ...(queryPlan.trace.graphDirection === undefined
         ? {}
@@ -381,6 +386,11 @@ export class RagAnswerRuntime {
       context = this.contextBuilder.build({
         profile: request.profile,
         retrieval,
+        queryIntent: {
+          primary: queryPlan.intent.primary,
+          secondary: queryPlan.intent.secondary,
+          sourceHints: queryPlan.intent.sourceHints
+        },
         contextId,
         includeRejected:
           request.includeRejected ??
@@ -458,6 +468,7 @@ async function retrieveWithQueryPlan(input: {
     const result = await input.retriever.retrieve(
       retrievalRequestForPlannedQuery({
         request: input.request,
+        queryPlan: input.queryPlan,
         plannedQuery: query.plannedQuery,
         branchBudget: query.budget,
         retrievalId: input.retrievalId,
@@ -472,6 +483,7 @@ async function retrieveWithQueryPlan(input: {
       input.retriever.retrieve(
         retrievalRequestForPlannedQuery({
           request: input.request,
+          queryPlan: input.queryPlan,
           plannedQuery: query.plannedQuery,
           branchBudget: query.budget,
           retrievalId: `${input.retrievalId}_${query.plannedQuery.id}`,
@@ -494,6 +506,7 @@ async function retrieveWithQueryPlan(input: {
 
 function retrievalRequestForPlannedQuery(input: {
   readonly request: RagQueryRequest;
+  readonly queryPlan: QueryPlan;
   readonly plannedQuery: PlannedQuery;
   readonly branchBudget?: RetrievalBranchBudget;
   readonly retrievalId: string;
@@ -510,14 +523,20 @@ function retrievalRequestForPlannedQuery(input: {
     (input.expandCandidatePool && candidatePoolLimit !== undefined
       ? Math.min(candidatePoolLimit, 100)
       : requestedTopK);
+  const filter = applyBranchFilter(input.request.filter, input.branchBudget?.filter);
 
   return {
     query: input.plannedQuery.query,
-    filter: input.request.filter,
+    filter,
     topK,
     mode: input.request.profile.retrieval.mode,
     ...(candidatePoolLimit !== undefined ? { candidatePoolLimit } : {}),
     ...(input.branchBudget?.graph === undefined ? {} : { graph: input.branchBudget.graph }),
+    intent: {
+      primary: input.queryPlan.intent.primary,
+      secondary: input.queryPlan.intent.secondary,
+      sourceHints: input.queryPlan.intent.sourceHints
+    },
     includeRejected:
       input.request.includeRejected ??
       input.request.profile.observabilityPolicy.includeRejectedChunksInTrace,
@@ -561,6 +580,9 @@ function mergePlannedRetrievalResults(input: {
     ...(candidate.graphEvidence === undefined ? {} : { graphEvidence: candidate.graphEvidence })
   }));
   const rejected = dedupeRetrievalRejections(input.results.flatMap((result) => result.rejected));
+  const freshnessTrace = mergeFreshnessTraces(
+    input.results.map((result) => result.trace.freshness).filter((trace) => trace !== undefined)
+  );
 
   return {
     query: input.request.question,
@@ -581,8 +603,27 @@ function mergePlannedRetrievalResults(input: {
       fusionStrategy: "planned_query_rrf",
       childRetrievalIds: input.results.map((result) => result.trace.retrievalId),
       plannedQueryHashes: input.budgetedQueries.map((query) => hashText(query.plannedQuery.query)),
-      retrievalBudget: redactRetrievalBudgetTrace(input.retrievalBudget)
+      retrievalBudget: redactRetrievalBudgetTrace(input.retrievalBudget),
+      ...(freshnessTrace === undefined ? {} : { freshness: freshnessTrace })
     }
+  };
+}
+
+function mergeFreshnessTraces(
+  traces: readonly RetrievalFreshnessTrace[]
+): RetrievalFreshnessTrace | undefined {
+  if (traces.length === 0) {
+    return undefined;
+  }
+
+  const boostedCandidateCount = traces.reduce((sum, trace) => sum + trace.boostedCandidateCount, 0);
+  return {
+    applied: traces.some((trace) => trace.applied),
+    boostedCandidateCount,
+    reason:
+      boostedCandidateCount > 0
+        ? "Freshness query intent applied bounded recency ranking boost in planned retrieval branches."
+        : "Freshness query intent was detected in planned retrieval branches, but no candidates had boostable recency metadata."
   };
 }
 
@@ -641,12 +682,67 @@ function redactRetrievalBudgetTrace(retrievalBudget: RetrievalBudgetPlan): Retri
   return {
     ...retrievalBudget,
     branches: retrievalBudget.branches.map((branch) => {
-      const { graph, ...rest } = branch;
+      const { graph, filter, prefer, ...rest } = branch;
       return {
         ...rest,
+        ...(filter === undefined ? {} : { routeFilter: redactBranchFilterTrace(filter) }),
+        ...(prefer === undefined ? {} : { routePreference: redactBranchPreferenceTrace(prefer) }),
         ...(graph === undefined ? {} : { graph: redactGraphBudgetTrace(graph) })
       };
     })
+  };
+}
+
+function applyBranchFilter(
+  baseFilter: RagQueryRequest["filter"],
+  branchFilter: RetrievalBranchBudget["filter"] | undefined
+): RagQueryRequest["filter"] {
+  if (branchFilter === undefined) {
+    return baseFilter;
+  }
+  const sourceIds = intersectOptionalList(baseFilter.sourceIds, branchFilter.sourceIds);
+  const sourceKinds = intersectOptionalList(baseFilter.sourceKinds, branchFilter.sourceKinds);
+  const trustTiers = intersectOptionalList(baseFilter.trustTiers, branchFilter.trustTiers);
+
+  return {
+    ...baseFilter,
+    ...(sourceIds === undefined ? {} : { sourceIds }),
+    ...(sourceKinds === undefined ? {} : { sourceKinds }),
+    ...(trustTiers === undefined ? {} : { trustTiers })
+  };
+}
+
+function intersectOptionalList<Value extends string>(
+  existing: readonly Value[] | undefined,
+  routed: readonly Value[] | undefined
+): readonly Value[] | undefined {
+  if (routed === undefined || routed.length === 0) {
+    return existing;
+  }
+
+  if (existing === undefined || existing.length === 0) {
+    return routed;
+  }
+
+  const routedValues = new Set<unknown>(routed);
+  return existing.filter((value) => routedValues.has(value));
+}
+
+function redactBranchFilterTrace(filter: NonNullable<RetrievalBranchBudget["filter"]>) {
+  return {
+    sourceIdCount: filter.sourceIds?.length ?? 0,
+    sourceIdHashes: (filter.sourceIds ?? []).map(hashText),
+    sourceKindCount: filter.sourceKinds?.length ?? 0,
+    sourceKindHashes: (filter.sourceKinds ?? []).map(hashText),
+    trustTierCount: filter.trustTiers?.length ?? 0,
+    trustTierHashes: (filter.trustTiers ?? []).map(hashText)
+  };
+}
+
+function redactBranchPreferenceTrace(preference: NonNullable<RetrievalBranchBudget["prefer"]>) {
+  return {
+    ...redactBranchFilterTrace(preference),
+    fusionWeightMultiplier: preference.fusionWeightMultiplier
   };
 }
 

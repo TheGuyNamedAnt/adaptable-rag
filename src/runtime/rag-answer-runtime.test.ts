@@ -483,6 +483,129 @@ test("query runtime applies per-branch retrieval budgets to planned queries", as
   assert.equal(JSON.stringify(result.trace).includes("Acme Corp"), false);
 });
 
+test("query runtime applies profile source-hint filters without broadening caller filters", async () => {
+  const routedProfile = assertValidProfile({
+    ...profile,
+    corpusSources: [
+      {
+        id: "support_docs",
+        adapter: "local-files",
+        description: "Support docs.",
+        enabled: true,
+        trustTierFloor: "trusted_internal",
+        tags: ["support"]
+      },
+      {
+        id: "feedback_examples",
+        adapter: "local-files",
+        description: "Feedback examples.",
+        enabled: true,
+        trustTierFloor: "user_provided",
+        tags: ["tickets"]
+      }
+    ],
+    retrieval: {
+      ...profile.retrieval,
+      sourceHintRoutes: {
+        support: {
+          mode: "filter",
+          sourceIds: ["support_docs"]
+        }
+      }
+    }
+  });
+  const runtime = runtimeFor([
+    makeDocument({
+      id: "doc_support_password",
+      body: "Password reset failures after login updates are handled from support docs.",
+      provenance: {
+        sourceId: "support_docs",
+        sourceKind: "local_file",
+        title: "Support Password Reset",
+        ingestedAt: FIXED_NOW,
+        trustTier: "trusted_internal",
+        sensitivity: "internal",
+        capturedAt: FIXED_NOW
+      }
+    }),
+    makeDocument({
+      id: "doc_feedback_password",
+      body: "Password reset failures are also mentioned in feedback examples.",
+      provenance: {
+        sourceId: "feedback_examples",
+        sourceKind: "support_ticket",
+        title: "Feedback Password Reset",
+        ingestedAt: FIXED_NOW,
+        trustTier: "user_provided",
+        sensitivity: "internal",
+        capturedAt: FIXED_NOW
+      }
+    })
+  ]);
+
+  const result = await runtime.answer(
+    baseRequest({
+      profile: routedProfile,
+      question: "Why can't users reset passwords after the login update?"
+    })
+  );
+
+  assert.equal(result.status, "succeeded");
+  assert.deepEqual(
+    result.retrieval.candidates.map((candidate) => candidate.chunk.provenance.sourceId),
+    ["support_docs"]
+  );
+  const routeFilter = result.retrieval.trace.retrievalBudget?.branches[0]?.routeFilter;
+  assert.equal(routeFilter?.sourceIdCount, 1);
+  assert.deepEqual(routeFilter?.sourceIdHashes, [hashText("support_docs")]);
+  assert.equal(JSON.stringify(result.retrieval.trace).includes("support_docs"), false);
+});
+
+test("query runtime redacts profile source-hint preferences in retrieval budget traces", async () => {
+  const preferredProfile = assertValidProfile({
+    ...profile,
+    corpusSources: [
+      {
+        id: "curated_docs",
+        adapter: "local-files",
+        description: "Curated docs.",
+        enabled: true,
+        trustTierFloor: "trusted_internal",
+        tags: ["docs"]
+      }
+    ],
+    retrieval: {
+      ...profile.retrieval,
+      sourceHintRoutes: {
+        docs: {
+          mode: "prefer",
+          sourceIds: ["curated_docs"]
+        }
+      }
+    }
+  });
+  const runtime = runtimeFor([
+    makeDocument({
+      id: "doc_preferred_docs",
+      body: "Refund policy says preferred docs should stay citable."
+    })
+  ]);
+
+  const result = await runtime.answer(
+    baseRequest({
+      profile: preferredProfile,
+      question: "What does the refund policy say?"
+    })
+  );
+
+  assert.equal(result.status, "succeeded");
+  const routePreference = result.retrieval.trace.retrievalBudget?.branches[0]?.routePreference;
+  assert.equal(routePreference?.sourceIdCount, 1);
+  assert.deepEqual(routePreference?.sourceIdHashes, [hashText("curated_docs")]);
+  assert.equal(routePreference?.fusionWeightMultiplier, 1.15);
+  assert.equal(JSON.stringify(result.retrieval.trace).includes("curated_docs"), false);
+});
+
 test("query runtime redacts graph entity hints from retrieval budget traces", async () => {
   const graphProfile = assertValidProfile({
     ...genericDocsProfile,
@@ -770,8 +893,16 @@ class StaticQueryPlanner implements QueryPlanner {
 
   plan(request: Parameters<QueryPlanner["plan"]>[0]): QueryPlan {
     const graphIntent = this.graphIntent;
+    const relationshipIntent = graphIntent.route !== "none";
     return {
       originalQuestion: request.question,
+      intent: {
+        primary: relationshipIntent ? "relationship" : "general",
+        secondary: [],
+        sourceHints: relationshipIntent ? ["graph"] : ["docs"],
+        confidence: 0.8,
+        reason: "Static test planner query intent."
+      },
       lowLevelKeywords: ["Acme Corp"],
       highLevelKeywords: ["refund", "billing", "review"],
       graphIntent,
@@ -785,6 +916,10 @@ class StaticQueryPlanner implements QueryPlanner {
         plannedQueryHashes: this.queries.map((query) => hashText(query.query)),
         lowLevelKeywordHashes: [hashText("Acme Corp")],
         highLevelKeywordHashes: [hashText("refund"), hashText("billing"), hashText("review")],
+        primaryIntent: relationshipIntent ? "relationship" : "general",
+        secondaryIntentHashes: [],
+        sourceHintHashes: [hashText(relationshipIntent ? "graph" : "docs")],
+        intentConfidence: 0.8,
         graphRoute: graphIntent.route,
         ...(graphIntent.direction === undefined ? {} : { graphDirection: graphIntent.direction }),
         ...(graphIntent.executionMode === undefined

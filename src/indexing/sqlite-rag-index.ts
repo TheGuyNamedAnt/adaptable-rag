@@ -34,6 +34,7 @@ import type {
   IndexSnapshot,
   IndexStats
 } from "./index-types.js";
+import { SQLITE_INDEX_SCALE_CAPABILITIES } from "./scale-capabilities.js";
 import { validateChunksForIndex, validateDocumentForIndex } from "./index-validation.js";
 
 export interface SqliteRagIndexOptions {
@@ -79,12 +80,14 @@ export class SqliteRagIndex implements DocumentStore, ChunkStore, FtsIndexStore,
     enforcesAccessFilters: true,
     supportsKeywordScan: false,
     supportsVectorSearch: false,
-    supportsHybridSearch: false
+    supportsHybridSearch: false,
+    scale: SQLITE_INDEX_SCALE_CAPABILITIES
   };
 
   private readonly db: DatabaseSync;
   private readonly now: () => string;
   private readonly chunkingPolicy: ChunkingPolicy;
+  private readonly ftsAvailable: boolean;
 
   constructor(options: SqliteRagIndexOptions) {
     const { DatabaseSync } = loadNodeSqlite();
@@ -95,6 +98,7 @@ export class SqliteRagIndex implements DocumentStore, ChunkStore, FtsIndexStore,
     this.now = options.now ?? (() => new Date().toISOString());
     this.chunkingPolicy = options.chunkingPolicy ?? DEFAULT_CHUNKING_POLICY;
     this.configure(options);
+    this.ftsAvailable = sqliteFts5Available(this.db);
     this.migrate();
   }
 
@@ -303,7 +307,9 @@ export class SqliteRagIndex implements DocumentStore, ChunkStore, FtsIndexStore,
 
     this.transaction(() => {
       for (const indexed of allowed) {
-        this.db.prepare("DELETE FROM chunk_fts WHERE chunk_id = ?").run(indexed.chunk.id);
+        if (this.ftsAvailable) {
+          this.db.prepare("DELETE FROM chunk_fts WHERE chunk_id = ?").run(indexed.chunk.id);
+        }
         this.db.prepare("DELETE FROM chunks WHERE id = ?").run(indexed.chunk.id);
       }
     });
@@ -338,6 +344,18 @@ export class SqliteRagIndex implements DocumentStore, ChunkStore, FtsIndexStore,
   }
 
   writeKeywordChunks(request: FtsWriteChunksRequest): FtsWriteChunksResult {
+    if (!this.ftsAvailable) {
+      return {
+        indexedChunkCount: 0,
+        rejectedChunkCount: request.chunks.length,
+        results: request.chunks.map((chunk) => ({
+          accepted: false,
+          id: chunk.id,
+          message: "SQLite FTS5 is not available; keyword index row was not written."
+        }))
+      };
+    }
+
     const results: IndexOperationResult[] = [];
     this.transaction(() => {
       for (const chunk of request.chunks) {
@@ -380,6 +398,15 @@ export class SqliteRagIndex implements DocumentStore, ChunkStore, FtsIndexStore,
   deleteKeywordChunksForDocument(
     request: FtsDeleteChunksForDocumentRequest
   ): IndexChunkDeleteResult {
+    if (!this.ftsAvailable) {
+      return {
+        accepted: false,
+        documentId: request.documentId,
+        deletedChunkCount: 0,
+        message: "SQLite FTS5 is not available; keyword index rows were not deleted."
+      };
+    }
+
     if (!isValidIndexFilter(request.filter)) {
       return {
         accepted: false,
@@ -413,7 +440,7 @@ export class SqliteRagIndex implements DocumentStore, ChunkStore, FtsIndexStore,
   }
 
   searchKeywordChunks(request: FtsSearchRequest): readonly FtsSearchResult[] {
-    if (!isValidIndexFilter(request.filter) || request.terms.length === 0) {
+    if (!this.ftsAvailable || !isValidIndexFilter(request.filter) || request.terms.length === 0) {
       return [];
     }
     const ftsQuery = sqliteFtsQuery(request.terms);
@@ -530,7 +557,7 @@ export class SqliteRagIndex implements DocumentStore, ChunkStore, FtsIndexStore,
             expectedVersion: SQLITE_RAG_INDEX_SCHEMA_VERSION,
             actualVersion: userVersion
           },
-      ...["documents", "chunks", "chunk_fts"].map((tableName) =>
+      ...["documents", "chunks"].map((tableName) =>
         this.tableExists(tableName)
           ? {
               id: `${tableName}_table`,
@@ -542,7 +569,31 @@ export class SqliteRagIndex implements DocumentStore, ChunkStore, FtsIndexStore,
               status: "failed" as const,
               message: `${tableName} table is missing.`
             }
-      )
+      ),
+      this.ftsAvailable
+        ? {
+            id: "sqlite_fts5",
+            status: "passed" as const,
+            message: "SQLite FTS5 is available."
+          }
+        : {
+            id: "sqlite_fts5",
+            status: "failed" as const,
+            message: "SQLite FTS5 is not available in this Node SQLite build."
+          },
+      this.ftsAvailable && this.tableExists("chunk_fts")
+        ? {
+            id: "chunk_fts_table",
+            status: "passed" as const,
+            message: "chunk_fts table exists."
+          }
+        : {
+            id: "chunk_fts_table",
+            status: "failed" as const,
+            message: this.ftsAvailable
+              ? "chunk_fts table is missing."
+              : "chunk_fts table is unavailable because SQLite FTS5 is not enabled."
+          }
     ];
     return {
       status: checks.some((check) => check.status === "failed") ? "failed" : "passed",
@@ -598,13 +649,6 @@ export class SqliteRagIndex implements DocumentStore, ChunkStore, FtsIndexStore,
           updated_at TEXT,
           created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
-        CREATE VIRTUAL TABLE IF NOT EXISTS chunk_fts USING fts5(
-          chunk_id UNINDEXED,
-          title,
-          citation_title,
-          body,
-          tokenize = 'porter unicode61'
-        );
         CREATE INDEX IF NOT EXISTS rag_sqlite_documents_scope_idx ON documents (tenant_id, namespace_id);
         CREATE INDEX IF NOT EXISTS rag_sqlite_documents_source_idx ON documents (tenant_id, namespace_id, source_id);
         CREATE INDEX IF NOT EXISTS rag_sqlite_chunks_scope_idx ON chunks (tenant_id, namespace_id);
@@ -612,6 +656,17 @@ export class SqliteRagIndex implements DocumentStore, ChunkStore, FtsIndexStore,
         CREATE INDEX IF NOT EXISTS rag_sqlite_chunks_source_idx ON chunks (tenant_id, namespace_id, source_id);
         CREATE INDEX IF NOT EXISTS rag_sqlite_chunks_trust_idx ON chunks (tenant_id, namespace_id, trust_tier);
         PRAGMA user_version = ${SQLITE_RAG_INDEX_SCHEMA_VERSION};
+      `);
+    }
+    if (this.ftsAvailable) {
+      this.db.exec(`
+        CREATE VIRTUAL TABLE IF NOT EXISTS chunk_fts USING fts5(
+          chunk_id UNINDEXED,
+          title,
+          citation_title,
+          body,
+          tokenize = 'porter unicode61'
+        );
       `);
     }
   }
@@ -679,15 +734,20 @@ export class SqliteRagIndex implements DocumentStore, ChunkStore, FtsIndexStore,
   }
 
   private deleteStoredChunksForDocument(documentId: string): void {
-    this.db
-      .prepare(
-        "DELETE FROM chunk_fts WHERE chunk_id IN (SELECT id FROM chunks WHERE document_id = ?)"
-      )
-      .run(documentId);
+    if (this.ftsAvailable) {
+      this.db
+        .prepare(
+          "DELETE FROM chunk_fts WHERE chunk_id IN (SELECT id FROM chunks WHERE document_id = ?)"
+        )
+        .run(documentId);
+    }
     this.db.prepare("DELETE FROM chunks WHERE document_id = ?").run(documentId);
   }
 
   private upsertFtsChunk(chunk: RagChunk): void {
+    if (!this.ftsAvailable) {
+      return;
+    }
     this.db.prepare("DELETE FROM chunk_fts WHERE chunk_id = ?").run(chunk.id);
     this.db
       .prepare("INSERT INTO chunk_fts (chunk_id, title, citation_title, body) VALUES (?, ?, ?, ?)")
@@ -807,5 +867,15 @@ function loadNodeSqlite(): { readonly DatabaseSync: typeof DatabaseSync } {
     throw new Error(
       `SqliteRagIndex requires a Node.js runtime with node:sqlite support. Current runtime: ${process.version}.`
     );
+  }
+}
+
+function sqliteFts5Available(db: DatabaseSync): boolean {
+  try {
+    db.exec("CREATE VIRTUAL TABLE temp.__rag_fts5_probe USING fts5(value)");
+    db.exec("DROP TABLE temp.__rag_fts5_probe");
+    return true;
+  } catch {
+    return false;
   }
 }

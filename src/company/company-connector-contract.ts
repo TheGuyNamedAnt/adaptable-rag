@@ -28,6 +28,10 @@ export type CompanyConnectorContractIssueCode =
   | "connector_warning_shape"
   | "connector_warning_unexpected"
   | "connector_warning_leaks_sensitive_diagnostics"
+  | "connector_warning_leaks_record_body"
+  | "connector_error_shape"
+  | "connector_error_leaks_sensitive_diagnostics"
+  | "connector_error_leaks_record_body"
   | "records_match_source"
   | "records_have_required_fields"
   | "records_have_safe_acl"
@@ -269,6 +273,7 @@ function validateContractCase(input: {
   const issues: CompanyConnectorContractIssue[] = [];
   validateRunShape(input, issues);
   validateConnectorWarnings(input, issues);
+  validateConnectorErrors(input, issues);
   validateRecords(input, issues);
   validateDeletedItems(input, issues);
   validateLedger(input, issues);
@@ -415,6 +420,66 @@ function validateConnectorWarnings(
         })
       );
     }
+
+    if (messageCopiesRecordBody(warning.message, input.run.records)) {
+      issues.push(
+        issue(input, {
+          severity: "error",
+          code: "connector_warning_leaks_record_body",
+          path: `warnings[${index}].message`,
+          message: "Connector warning message appears to copy private record body text."
+        })
+      );
+    }
+  });
+}
+
+function validateConnectorErrors(
+  input: {
+    readonly registration: CompanySourceConnectorRegistration;
+    readonly source: CorpusSourceConfig;
+    readonly run: SourceSyncRunResult;
+    readonly mode: SourceSyncMode;
+    readonly expectations: NormalizedExpectations;
+  },
+  issues: CompanyConnectorContractIssue[]
+): void {
+  input.run.failed.forEach((failed, index) => {
+    if (!failed.sourceItemId.trim() || !failed.errorCode.trim() || !failed.message.trim()) {
+      issues.push(
+        issue(input, {
+          severity: "error",
+          code: "connector_error_shape",
+          path: `failed[${index}]`,
+          message:
+            "Connector error items must include a stable sourceItemId, errorCode, and non-empty safe message."
+        })
+      );
+    }
+
+    if (
+      input.expectations.forbiddenDiagnosticPatterns.some((pattern) => pattern.test(failed.message))
+    ) {
+      issues.push(
+        issue(input, {
+          severity: "error",
+          code: "connector_error_leaks_sensitive_diagnostics",
+          path: `failed[${index}].message`,
+          message: "Connector error message appears to contain sensitive diagnostics."
+        })
+      );
+    }
+
+    if (messageCopiesRecordBody(failed.message, input.run.records)) {
+      issues.push(
+        issue(input, {
+          severity: "error",
+          code: "connector_error_leaks_record_body",
+          path: `failed[${index}].message`,
+          message: "Connector error message appears to copy private record body text."
+        })
+      );
+    }
   });
 }
 
@@ -514,6 +579,42 @@ function validateDeletedItems(
       );
     }
   });
+}
+
+function messageCopiesRecordBody(message: string, records: readonly CorpusRecord[]): boolean {
+  const normalizedMessage = normalizeLeakCheckText(message);
+  if (normalizedMessage.length === 0) {
+    return false;
+  }
+
+  return records.some((record) => {
+    const normalizedBody = normalizeLeakCheckText(record.body);
+    if (normalizedBody.length < 24) {
+      return false;
+    }
+    return (
+      normalizedMessage.includes(normalizedBody) ||
+      leakCheckWindows(normalizedBody).some((window) => normalizedMessage.includes(window))
+    );
+  });
+}
+
+function leakCheckWindows(value: string): readonly string[] {
+  const windowSize = 48;
+  if (value.length <= windowSize) {
+    return [value];
+  }
+
+  const windows = new Set<string>();
+  for (let index = 0; index < value.length - windowSize; index += windowSize) {
+    windows.add(value.slice(index, index + windowSize));
+  }
+  windows.add(value.slice(-windowSize));
+  return [...windows];
+}
+
+function normalizeLeakCheckText(value: string): string {
+  return value.replace(/\s+/gu, " ").trim().toLowerCase();
 }
 
 function validateLedger(

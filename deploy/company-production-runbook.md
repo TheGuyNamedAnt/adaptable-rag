@@ -82,6 +82,12 @@ set +a
 
 psql "$RAG_DATABASE_URL" -f deploy/postgres/001_core_storage.sql
 psql "$RAG_DATABASE_URL" -f deploy/postgres/002_vector_hnsw_1536.sql
+psql "$RAG_DATABASE_URL" -f deploy/postgres/003_ingestion_failure_stage.sql
+psql "$RAG_DATABASE_URL" -f deploy/postgres/004_admin_trace_history.sql
+psql "$RAG_DATABASE_URL" -f deploy/postgres/005_admin_connector_state.sql
+psql "$RAG_DATABASE_URL" -f deploy/postgres/006_admin_review_queue.sql
+psql "$RAG_DATABASE_URL" -f deploy/postgres/007_ingestion_scale_queue.sql
+psql "$RAG_DATABASE_URL" -f deploy/postgres/008_index_generation_promotions.sql
 ```
 
 `002_vector_hnsw_1536.sql` is only correct when `RAG_VECTOR_DIMENSIONS=1536`. For another embedding dimension, copy that migration, replace `1536`, and apply the copied migration before traffic.
@@ -89,10 +95,16 @@ psql "$RAG_DATABASE_URL" -f deploy/postgres/002_vector_hnsw_1536.sql
 ## 5. Validate The Company Pack
 
 ```bash
+set -a
+. ./.env.company-production
+set +a
+
 npm run company:validate -- \
   --module dist/company/examples/acme-support.company.js \
-  --export acmeSupportCompanyProfile \
-  --adapter-pack-export acmeSupportAdapterPack \
+  --export acmeSupportDeployment \
+  --require-manifest-env \
+  --require-smoke-commands \
+  --manifest-root . \
   --run-pack-contracts \
   --use-case support \
   --principal-role support \
@@ -101,6 +113,7 @@ npm run company:validate -- \
 ```
 
 Do not promote unless `.rag/company/acme-support/company-deployment.json` reports `status=ready` and `.rag/company/acme-support/company-pack-contracts.json` reports `status=passed`.
+The manifest validation section must also report `status=passed`; that proves required production env names are populated, required eval files exist under the manifest root, and the module publishes its smoke commands.
 
 ## 6. Check Runtime And Database Readiness
 
@@ -113,7 +126,7 @@ node dist/runtime/production-cli.js validate-config --run-pack-contracts true
 node dist/runtime/production-cli.js validate-config --self-test true
 ```
 
-The self-test calls the Postgres index and vector readiness checks. It fails when the core tables, weighted FTS index, pgvector extension, vector table, vector dimension compatibility, or dimension-specific ANN index are missing.
+The self-test calls the Postgres index and vector readiness checks. It fails when the core tables, weighted FTS index, pgvector extension, vector table, embedding identity filter index, vector dimension compatibility, or dimension-specific ANN index are missing.
 
 For a controlled live-provider drill, add:
 
@@ -129,8 +142,7 @@ Use full sync for the first import or repair. Keep `--delete-missing false` on t
 npm run company:smoke -- \
   --env-file .env.company-production \
   --module dist/company/examples/acme-support.company.js \
-  --export acmeSupportCompanyProfile \
-  --adapter-pack-export acmeSupportAdapterPack \
+  --export acmeSupportDeployment \
   --use-case support \
   --sync-mode full \
   --delete-missing false \
@@ -155,8 +167,7 @@ After the first import, normal company updates should use delta sync against the
 npm run company:smoke -- \
   --env-file .env.company-production \
   --module dist/company/examples/acme-support.company.js \
-  --export acmeSupportCompanyProfile \
-  --adapter-pack-export acmeSupportAdapterPack \
+  --export acmeSupportDeployment \
   --use-case support \
   --sync-mode delta \
   --tenant-id tenant_acme \
@@ -172,7 +183,138 @@ npm run company:smoke -- \
 
 Delta smoke proves the module can reload the saved source-sync cursor and write a new safe ledger entry without replaying the whole source system.
 
-## 9. Serve
+## 9. Distributed Ingestion Workers
+
+For large backfills, enqueue bounded batches instead of running one foreground
+ingest:
+
+```bash
+node dist/runtime/production-cli.js enqueue-ingestion \
+  --plan-id backfill_acme_support_20260624 \
+  --tenant-id tenant_acme \
+  --namespace-id acme-support \
+  --source-id support_docs \
+  --batch-size 10 \
+  --priority 5 \
+  --metadata reason=promotion_backfill
+```
+
+Then run one or more bounded workers:
+
+```bash
+node dist/runtime/production-cli.js worker \
+  --max-jobs 10 \
+  --worker-id worker_acme_1 \
+  --tenant-id tenant_acme \
+  --namespace-id acme-support \
+  --principal-namespace-id acme-support \
+  --user-id ingestion_worker \
+  --role ingestion-worker \
+  --overwrite replace
+```
+
+Use `enqueue-ingestion --mode reindex --dry-run true` before embedding or
+chunking migrations to review the candidate generation and promotion plan before
+writing queue rows.
+
+Inspect, cancel, or requeue queue items through the same CLI:
+
+```bash
+node dist/runtime/production-cli.js inspect-ingestion-queue \
+  --tenant-id tenant_acme \
+  --namespace-id acme-support \
+  --status dead_letter \
+  --limit 20
+node dist/runtime/production-cli.js cancel-ingestion-queue-job \
+  --queue-id backfill_acme_support_20260624_queue_4 \
+  --reason "Duplicate backfill request"
+node dist/runtime/production-cli.js requeue-ingestion-queue-job \
+  --queue-id backfill_acme_support_20260624_queue_5 \
+  --available-at 2026-06-24T12:00:00.000Z \
+  --max-attempts 3 \
+  --reason "Provider recovered" \
+  --metadata operator=search-team
+```
+
+Cancellation only applies to queued or leased jobs. Requeue only applies to
+dead-letter jobs and preserves the last error fields for audit.
+
+## 10. Promote Index Generations
+
+For embedding or chunking migrations, persist the candidate generation and
+promotion gate before switching active traffic:
+
+```bash
+node dist/runtime/production-cli.js plan-generation-promotion \
+  --promotion-id promote_acme_support_20260624 \
+  --tenant-id tenant_acme \
+  --namespace-id acme-support \
+  --profile-id acme-support-profile \
+  --generation-id gen_acme_support_20260624 \
+  --embedding-provider openai \
+  --embedding-model text-embedding-3-large \
+  --embedding-dimensions 3072 \
+  --embedding-config-hash replace_with_candidate_embedding_hash \
+  --embedding-index-config-hash replace_with_candidate_index_hash \
+  --chunking-policy-id default \
+  --chunking-policy-version 2 \
+  --required-eval-id retrieval_regression \
+  --required-eval-id citation_regression
+node dist/runtime/production-cli.js record-generation-eval \
+  --promotion-id promote_acme_support_20260624 \
+  --eval-id retrieval_regression \
+  --eval-status passed \
+  --report-uri s3://rag-evals/acme/retrieval-regression.json
+node dist/runtime/production-cli.js record-generation-eval \
+  --promotion-id promote_acme_support_20260624 \
+  --eval-id citation_regression \
+  --eval-status passed \
+  --report-uri s3://rag-evals/acme/citation-regression.json
+node dist/runtime/production-cli.js inspect-generation-promotion \
+  --promotion-id promote_acme_support_20260624
+node dist/runtime/production-cli.js promote-generation \
+  --promotion-id promote_acme_support_20260624
+```
+
+`promote-generation` fails if any required eval id is missing or failed. After
+promotion, verify the active generation:
+
+```bash
+node dist/runtime/production-cli.js inspect-index-generations \
+  --tenant-id tenant_acme \
+  --namespace-id acme-support \
+  --generation-status active
+```
+
+## 11. Inspect Production State
+
+After full or delta sync, inspect the durable Postgres job state before opening traffic:
+
+```bash
+node dist/runtime/production-cli.js inspect-ingestion-jobs \
+  --tenant-id tenant_acme \
+  --namespace-id acme-support \
+  --limit 20
+node dist/runtime/production-cli.js inspect-ingestion-job \
+  --job-id company_sync_20260624 \
+  --source-id support_docs \
+  --document-status failed \
+  --document-limit 50
+node dist/runtime/production-cli.js inspect-source-health \
+  --job-id company_sync_20260624 \
+  --source-id support_docs
+```
+
+Use the latest run id from the smoke artifact or job list. The output includes job stage, checkpoints, source progress, failed documents, skipped documents, accepted documents, and retryable failure counts without source bodies or chunk text.
+
+For eval and incident artifacts:
+
+```bash
+node dist/runtime/production-cli.js inspect-eval-failure --summary .rag/eval-runs/latest/summary.json
+node dist/runtime/production-cli.js inspect-citation --context .rag/eval-runs/latest/context.json
+```
+
+## 12. Serve
 
 ```bash
 set -a
@@ -195,6 +337,7 @@ Promote only when all of these are true:
 
 - migrations applied for the configured vector dimensions
 - company validator reports `ready`
+- manifest validation reports `passed`
 - pack contracts report `passed`
 - runtime self-test reports `passed`
 - first full company smoke reports `passed`
@@ -203,4 +346,4 @@ Promote only when all of these are true:
 
 ## Rollback
 
-Stop traffic first. Repoint `RAG_COMPANY_MODULE_PATH` and adapter-pack exports to the previous compiled module, then rerun `validate-config --run-pack-contracts true` and a delta company smoke. If the failed rollout may have produced incorrect deletes, run a repair full sync with `--delete-missing false` until the connector's complete listing is trusted.
+Stop traffic first. Repoint `RAG_COMPANY_MODULE_PATH` and `RAG_COMPANY_DEPLOYMENT_EXPORT` to the previous compiled module, then rerun `validate-config --run-pack-contracts true` and a delta company smoke. If the failed rollout may have produced incorrect deletes, run a repair full sync with `--delete-missing false` until the connector's complete listing is trusted.

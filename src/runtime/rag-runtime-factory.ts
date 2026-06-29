@@ -24,6 +24,8 @@ import { JsonFileGraphStore } from "../graph/json-file-graph-store.js";
 import { ProposalBackedRagGraphStore } from "../graph/proposal-graph-adapter.js";
 import { SqliteGraphStore } from "../graph/sqlite-graph-store.js";
 import type { ChunkStore } from "../indexing/chunk-store.js";
+import type { ChunkRelationship } from "../ingestion/chunk-relationships.js";
+import type { RetrievalReadinessReport } from "../ingestion/retrieval-readiness.js";
 import { PostgresRagIndex } from "../indexing/postgres-index.js";
 import { SqliteRagIndex } from "../indexing/sqlite-rag-index.js";
 import type { VectorStore } from "../indexing/vector-store.js";
@@ -34,6 +36,10 @@ import { assertValidProfile, type ValidatedRagProfile } from "../profiles/profil
 import type { QueryPlanner } from "../query/query-types.js";
 import { HybridRetriever } from "../retrieval/hybrid-retriever.js";
 import { AdaptiveRetrievalController } from "../retrieval/adaptive-retrieval-controller.js";
+import {
+  ConnectedChunkRetriever,
+  type ConnectedChunkRetrieverOptions
+} from "../retrieval/connected-chunk-retriever.js";
 import { KeywordRetriever } from "../retrieval/keyword-retriever.js";
 import { PostgresFtsKeywordRetriever } from "../retrieval/postgres-fts-keyword-retriever.js";
 import { FtsKeywordRetriever } from "../retrieval/fts-keyword-retriever.js";
@@ -90,6 +96,11 @@ export interface RagRuntimeAssemblyConfig {
   readonly generationRunner?: GenerationRunner;
   readonly queryPlanner?: QueryPlanner;
   readonly adaptiveRetrieval?: boolean;
+  readonly connectedChunkExpansion?:
+    | boolean
+    | Omit<ConnectedChunkRetrieverOptions, "retriever" | "chunkStore">;
+  readonly chunkRelationships?: readonly ChunkRelationship[];
+  readonly retrievalReadiness?: RetrievalReadinessReport;
   readonly graph?: RagRuntimeGraphAssemblyConfig;
   readonly now?: () => string;
 }
@@ -111,6 +122,7 @@ export interface AssembledRagRuntime {
   readonly graphApprovalRunner?: GraphApprovalRunner;
   readonly graphIngestionRunner?: GraphIngestionRunner;
   readonly graphEntityResolutionRunner?: GraphEntityResolutionRunner;
+  readonly retrievalReadinessWarnings: readonly string[];
   query(request: AssembledRagQueryRequest): Promise<RagQueryResult>;
   answer(request: AssembledRagAnswerRequest): Promise<RagAnswerResult>;
   agent(request: AssembledRagAgentRequest): Promise<RagAgentResult>;
@@ -196,6 +208,7 @@ export function assembleRagRuntime(config: RagRuntimeAssemblyConfig): AssembledR
     ...(graphApprovalRunner === undefined ? {} : { graphApprovalRunner }),
     ...(graphIngestionRunner === undefined ? {} : { graphIngestionRunner }),
     ...(graphEntityResolutionRunner === undefined ? {} : { graphEntityResolutionRunner }),
+    retrievalReadinessWarnings: runtimeReadinessWarnings(profile, config),
     query: (request) =>
       runtime.query({
         ...request,
@@ -270,13 +283,69 @@ function createRetrieverForProfile(
           chunkStore: config.chunkStore,
           ...(config.now === undefined ? {} : { now: config.now })
         });
-  const rerankedRetriever = wrapRetrieverWithReranker(profile, graphAwareRetriever, config);
+  const connectedRetriever = wrapRetrieverWithConnectedChunks(graphAwareRetriever, config);
+  const rerankedRetriever = wrapRetrieverWithReranker(profile, connectedRetriever, config);
   if (config.adaptiveRetrieval === false) {
     return rerankedRetriever;
   }
   return new AdaptiveRetrievalController({
     retriever: rerankedRetriever,
     ...(config.now === undefined ? {} : { now: config.now })
+  });
+}
+
+function runtimeReadinessWarnings(
+  profile: ValidatedRagProfile,
+  config: RagRuntimeAssemblyConfig
+): readonly string[] {
+  const readiness = config.retrievalReadiness;
+  if (readiness === undefined) {
+    return [];
+  }
+
+  const warnings: string[] = [];
+  if (!readiness.textIndexReady) {
+    warnings.push("runtime_text_index_not_ready");
+  }
+  if (
+    (profile.retrieval.mode === "vector" || profile.retrieval.mode === "hybrid") &&
+    !readiness.vectorIndexReady
+  ) {
+    warnings.push("runtime_vector_index_not_ready");
+  }
+  if (profile.retrieval.mode === "visual" && !readiness.visualIndexReady) {
+    warnings.push("runtime_visual_index_not_ready");
+  }
+  if (config.graph !== undefined && !readiness.graphReady) {
+    warnings.push("runtime_graph_not_ready");
+  }
+  if (config.connectedChunkExpansion !== false && !readiness.connectedChunkExpansionReady) {
+    warnings.push("runtime_connected_chunk_expansion_not_ready");
+  }
+
+  return [...new Set([...warnings, ...readiness.warningCodes])].sort();
+}
+
+function wrapRetrieverWithConnectedChunks(
+  retriever: Retriever,
+  config: RagRuntimeAssemblyConfig
+): Retriever {
+  if (config.connectedChunkExpansion === false) {
+    return retriever;
+  }
+
+  const options =
+    config.connectedChunkExpansion === undefined || config.connectedChunkExpansion === true
+      ? {}
+      : config.connectedChunkExpansion;
+
+  return new ConnectedChunkRetriever({
+    retriever,
+    chunkStore: config.chunkStore,
+    ...(config.chunkRelationships === undefined
+      ? {}
+      : { chunkRelationships: config.chunkRelationships }),
+    ...options
   });
 }
 

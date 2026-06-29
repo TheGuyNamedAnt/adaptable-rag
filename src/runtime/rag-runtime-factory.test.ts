@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { FakeEmbeddingAdapter } from "../embeddings/fake-embedding-adapter.js";
+import { embeddingIdentityFor } from "../embeddings/embedding-identity.js";
 import {
   FakeVisualEmbeddingAdapter,
   visualVectorsForText
@@ -16,6 +17,7 @@ import {
 import { FakeModelAdapter } from "../model/fake-model-adapter.js";
 import { genericDocsProfile } from "../profiles/examples/generic-docs.profile.js";
 import type { RagProfile, RetrievalMode } from "../profiles/profile.js";
+import { InMemoryRagIndex } from "../indexing/in-memory-index.js";
 import {
   FIXED_NOW,
   makeChunks,
@@ -148,7 +150,7 @@ test("runtime factory assembles visual retrieval from visual components", async 
     now: () => FIXED_NOW
   });
   visualVectorStore.addVisualChunkVectors(
-    chunks.map((chunk) => visualVectorForChunk(chunk, visualEmbeddingAdapter.dimensions))
+    chunks.map((chunk) => visualVectorForChunk(chunk, visualEmbeddingAdapter))
   );
 
   const assembled = assembleRagRuntime({
@@ -240,6 +242,130 @@ test("runtime factory can assemble graph-capable answer and agent APIs", async (
   assert.equal(agent.status, "succeeded");
 });
 
+test("runtime factory enables connected chunk expansion over ingested chunks by default", async () => {
+  const index = new InMemoryRagIndex({ now: () => FIXED_NOW });
+  const document = makeDocument({
+    id: "doc_connected_factory",
+    body: [
+      "Refund definitions and scope for support teams.",
+      "Refund approvals require manager review.",
+      "Approved refunds must include a support note."
+    ].join("\n\n")
+  });
+  const chunks = makeChunks(document);
+  index.addDocument(document);
+  index.addChunks(document.id, chunks);
+  const assembled = assembleRagRuntime({
+    profile: profileForMode("keyword"),
+    chunkStore: index,
+    model: new FakeModelAdapter({ now: () => FIXED_NOW }),
+    now: () => FIXED_NOW
+  });
+
+  const result = await assembled.query({
+    question: "manager",
+    filter: makeIndexFilter(),
+    topK: 3,
+    requestedAt: FIXED_NOW
+  });
+
+  assert.equal(result.status, "query_succeeded");
+  assert.ok(
+    result.retrieval.candidates.some((candidate) =>
+      candidate.reasons.includes("connected_previous_chunk")
+    )
+  );
+  assert.ok(
+    result.retrieval.candidates.some((candidate) =>
+      candidate.reasons.includes("connected_next_chunk")
+    )
+  );
+  assert.match(result.retrieval.trace.fusionStrategy ?? "", /connected_chunk_expansion/u);
+});
+
+test("runtime factory can disable connected chunk expansion", async () => {
+  const index = new InMemoryRagIndex({ now: () => FIXED_NOW });
+  const document = makeDocument({
+    id: "doc_connected_disabled",
+    body: [
+      "Refund definitions and scope for support teams.",
+      "Refund approvals require manager review.",
+      "Approved refunds must include a support note."
+    ].join("\n\n")
+  });
+  const chunks = makeChunks(document);
+  index.addDocument(document);
+  index.addChunks(document.id, chunks);
+  const assembled = assembleRagRuntime({
+    profile: profileForMode("keyword"),
+    chunkStore: index,
+    model: new FakeModelAdapter({ now: () => FIXED_NOW }),
+    connectedChunkExpansion: false,
+    now: () => FIXED_NOW
+  });
+
+  const result = await assembled.query({
+    question: "manager",
+    filter: makeIndexFilter(),
+    topK: 3,
+    requestedAt: FIXED_NOW
+  });
+
+  assert.equal(result.status, "query_succeeded");
+  assert.equal(
+    result.retrieval.candidates.some((candidate) =>
+      candidate.reasons.some((reason) => reason.startsWith("connected_"))
+    ),
+    false
+  );
+});
+
+test("runtime factory exposes retrieval readiness warnings", () => {
+  const { index } = makeIndexedFixture();
+  const assembled = assembleRagRuntime({
+    profile: profileForMode("keyword"),
+    chunkStore: index,
+    model: new FakeModelAdapter({ now: () => FIXED_NOW }),
+    graph: {
+      ontology: ownershipGraphOntology
+    },
+    retrievalReadiness: {
+      textIndexReady: true,
+      vectorIndexReady: false,
+      visualIndexReady: false,
+      graphReady: false,
+      connectedChunkExpansionReady: false,
+      documentCount: 1,
+      chunkCount: 1,
+      bodyChunkCount: 1,
+      derivedChunkCount: 0,
+      searchableUnitCounts: {
+        body_chunk: 1
+      },
+      layoutDocumentCount: 0,
+      pageCount: 0,
+      pagesNeedingOcrCount: 0,
+      parserQualityWarningCount: 0,
+      searchableArtifactWarningCount: 0,
+      chunkRelationshipCount: 0,
+      indexedVectorCount: 0,
+      indexedVisualVectorCount: 0,
+      knowledgeEntityCount: 0,
+      knowledgeRelationCount: 0,
+      warningCodes: ["graph_knowledge_empty", "vector_index_empty", "visual_index_empty"]
+    },
+    now: () => FIXED_NOW
+  });
+
+  assert.deepEqual(assembled.retrievalReadinessWarnings, [
+    "graph_knowledge_empty",
+    "runtime_connected_chunk_expansion_not_ready",
+    "runtime_graph_not_ready",
+    "vector_index_empty",
+    "visual_index_empty"
+  ]);
+});
+
 test("runtime factory exposes graph ingestion, approval, and entity resolution helpers", async () => {
   const { index } = makeIndexedFixture();
   const document = makeDocument({
@@ -281,7 +407,16 @@ test("runtime factory exposes graph ingestion, approval, and entity resolution h
   );
 });
 
-function visualVectorForChunk(chunk: RagChunk, dimensions: number): VisualChunkVector {
+function visualVectorForChunk(
+  chunk: RagChunk,
+  adapter: FakeVisualEmbeddingAdapter
+): VisualChunkVector {
+  const identity = embeddingIdentityFor({
+    provider: adapter.provider,
+    modelName: adapter.modelName,
+    dimensions: adapter.dimensions,
+    adapterId: adapter.id
+  });
   return {
     id: `visual_${chunk.id}`,
     chunkId: chunk.id,
@@ -289,9 +424,11 @@ function visualVectorForChunk(chunk: RagChunk, dimensions: number): VisualChunkV
     tenantId: chunk.accessScope.tenantId,
     namespaceId: chunk.namespaceId,
     textHash: chunk.textHash,
-    embeddingModel: "test-visual",
-    dimensions,
-    vectors: visualVectorsForText(chunk.text, dimensions),
+    embeddingModel: adapter.modelName,
+    embeddingProvider: adapter.provider,
+    embeddingConfigHash: identity.embeddingConfigHash,
+    dimensions: adapter.dimensions,
+    vectors: visualVectorsForText(chunk.text, adapter.dimensions),
     embeddedAt: FIXED_NOW
   };
 }

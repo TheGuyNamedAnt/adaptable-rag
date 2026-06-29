@@ -4,6 +4,10 @@ import type { CitationVisualAsset } from "../documents/provenance.js";
 import { isValidIndexFilter } from "./index-filter.js";
 import type { ChunkStore } from "./chunk-store.js";
 import type { IndexFilter, IndexOperationResult, IndexOverwriteMode } from "./index-types.js";
+import {
+  LOCAL_VECTOR_SCALE_CAPABILITIES,
+  type StorageScaleCapabilities
+} from "./scale-capabilities.js";
 import { cosineSimilarity, isFiniteVector } from "../shared/vector-math.js";
 
 export interface VisualChunkVector {
@@ -14,6 +18,8 @@ export interface VisualChunkVector {
   readonly namespaceId: string;
   readonly textHash: string;
   readonly embeddingModel: string;
+  readonly embeddingProvider?: string;
+  readonly embeddingConfigHash?: string;
   readonly dimensions: number;
   readonly vectors: readonly (readonly number[])[];
   readonly embeddedAt: string;
@@ -22,7 +28,11 @@ export interface VisualChunkVector {
   readonly pageNumber?: number;
   readonly layoutRegionIds?: readonly string[];
   readonly boundingBoxes?: readonly LayoutBox[];
+  readonly metadata?: VisualChunkVectorMetadata;
 }
+
+export type VisualChunkVectorMetadataValue = string | number | boolean;
+export type VisualChunkVectorMetadata = Readonly<Record<string, VisualChunkVectorMetadataValue>>;
 
 export interface IndexedVisualChunkVector {
   readonly visualVector: VisualChunkVector;
@@ -48,12 +58,14 @@ export interface VisualVectorStoreCapabilities {
   readonly enforcesAccessFilters: boolean;
   readonly supportsLateInteraction: boolean;
   readonly dimensions?: number;
+  readonly scale?: StorageScaleCapabilities;
 }
 
 export type VisualVectorSearchRejectionCode =
   | "invalid_filter"
   | "access_denied_or_missing_chunk"
   | "stale_vector"
+  | "embedding_identity_mismatch"
   | "vector_dimension_mismatch"
   | "no_visual_match";
 
@@ -75,6 +87,9 @@ export interface VisualVectorSearchRequest {
   readonly vectors: readonly (readonly number[])[];
   readonly filter: IndexFilter;
   readonly topK: number;
+  readonly embeddingModel?: string;
+  readonly embeddingProvider?: string;
+  readonly embeddingConfigHash?: string;
   readonly candidatePoolLimit?: number;
   readonly includeRejected?: boolean;
   readonly minScore?: number;
@@ -126,6 +141,7 @@ export class InMemoryVisualVectorStore implements VisualVectorStore {
       durable: false,
       enforcesAccessFilters: true,
       supportsLateInteraction: true,
+      scale: LOCAL_VECTOR_SCALE_CAPABILITIES,
       ...(options.dimensions !== undefined ? { dimensions: options.dimensions } : {})
     };
 
@@ -251,6 +267,18 @@ export class InMemoryVisualVectorStore implements VisualVectorStore {
         continue;
       }
 
+      const identityMismatch = embeddingIdentityMismatch(visualVector, request);
+      if (identityMismatch) {
+        if (request.includeRejected) {
+          rejected.push({
+            chunkId: visualVector.chunkId,
+            code: "embedding_identity_mismatch",
+            reason: identityMismatch
+          });
+        }
+        continue;
+      }
+
       const score = roundScore(lateInteractionScore(request.vectors, visualVector.vectors));
       if (score < minScore) {
         if (request.includeRejected) {
@@ -360,6 +388,33 @@ export function validateVisualChunkVector(
 
   validateCitationVisualAsset(vector);
   validateLayoutEvidence(vector);
+  validateVisualChunkVectorMetadata(vector);
+}
+
+function validateVisualChunkVectorMetadata(vector: VisualChunkVector): void {
+  if (vector.metadata === undefined) {
+    return;
+  }
+
+  if (!isRecord(vector.metadata) || Array.isArray(vector.metadata)) {
+    throw new Error(`Visual chunk vector "${vector.id}" metadata must be an object.`);
+  }
+
+  for (const [key, value] of Object.entries(vector.metadata)) {
+    if (!key.trim()) {
+      throw new Error(`Visual chunk vector "${vector.id}" metadata keys cannot be blank.`);
+    }
+
+    if (
+      typeof value !== "string" &&
+      typeof value !== "boolean" &&
+      !(typeof value === "number" && Number.isFinite(value))
+    ) {
+      throw new Error(
+        `Visual chunk vector "${vector.id}" metadata values must be strings, finite numbers, or booleans.`
+      );
+    }
+  }
 }
 
 export function validateVisualVectorSearchRequest(
@@ -390,6 +445,10 @@ export function validateVisualVectorSearchRequest(
     throw new Error("Visual vector search topK must be an integer between 1 and 100.");
   }
 
+  validateOptionalIdentityField(request.embeddingModel, "embeddingModel");
+  validateOptionalIdentityField(request.embeddingProvider, "embeddingProvider");
+  validateOptionalIdentityField(request.embeddingConfigHash, "embeddingConfigHash");
+
   if (
     request.candidatePoolLimit !== undefined &&
     (!Number.isInteger(request.candidatePoolLimit) ||
@@ -399,6 +458,37 @@ export function validateVisualVectorSearchRequest(
     throw new Error(
       "Visual vector search candidatePoolLimit must be an integer between topK and 5000."
     );
+  }
+}
+
+function embeddingIdentityMismatch(
+  vector: VisualChunkVector,
+  request: VisualVectorSearchRequest
+): string | undefined {
+  if (request.embeddingModel !== undefined && vector.embeddingModel !== request.embeddingModel) {
+    return "Visual chunk vector embedding model does not match the query embedding model.";
+  }
+
+  if (
+    request.embeddingProvider !== undefined &&
+    vector.embeddingProvider !== request.embeddingProvider
+  ) {
+    return "Visual chunk vector embedding provider does not match the query embedding provider.";
+  }
+
+  if (
+    request.embeddingConfigHash !== undefined &&
+    vector.embeddingConfigHash !== request.embeddingConfigHash
+  ) {
+    return "Visual chunk vector embedding config hash does not match the query embedding config hash.";
+  }
+
+  return undefined;
+}
+
+function validateOptionalIdentityField(value: string | undefined, fieldName: string): void {
+  if (value !== undefined && !value.trim()) {
+    throw new Error(`Visual vector search ${fieldName} cannot be blank.`);
   }
 }
 

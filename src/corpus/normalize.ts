@@ -4,9 +4,7 @@ import { isSourceKind, type SourceProvenance } from "../documents/provenance.js"
 import {
   isSourceSensitivity,
   isTrustTier,
-  isTrustUpgrade,
-  leastTrustedTier,
-  type TrustTier
+  resolveTrustTierDecision
 } from "../documents/trust-tier.js";
 import { hashText } from "../shared/hash.js";
 import type { CorpusSourceConfig } from "../profiles/profile.js";
@@ -147,14 +145,14 @@ export function normalizeCorpusRecord(
   validateAccessScope(record, context, issues);
   validateFreshness(record, context, issues);
 
-  const effectiveTrustTier = resolveEffectiveTrustTier(record, context, issues);
-  if (!context.profile.trustPolicy.allowedTrustTiers.includes(effectiveTrustTier)) {
+  const trustDecision = resolveEffectiveTrustTier(record, context, issues);
+  if (!context.profile.trustPolicy.allowedTrustTiers.includes(trustDecision.effectiveTrustTier)) {
     issues.push({
       severity: "error",
       code: "disallowed_trust_tier",
       recordId: recordId(record),
       path: "trustTier",
-      message: `Trust tier "${effectiveTrustTier}" is not allowed by profile "${context.profile.id}".`
+      message: `Trust tier "${trustDecision.effectiveTrustTier}" is not allowed by profile "${context.profile.id}".`
     });
   }
 
@@ -171,7 +169,7 @@ export function normalizeCorpusRecord(
     sourceKind: record.sourceKind,
     title: stringField(record.title).trim(),
     ingestedAt: context.ingestedAt,
-    trustTier: effectiveTrustTier,
+    trustTier: trustDecision.effectiveTrustTier,
     sensitivity: record.sensitivity,
     ...(stringField(record.originUri) ? { originUri: stringField(record.originUri) } : {}),
     ...(stringField(record.path) ? { path: stringField(record.path) } : {}),
@@ -190,7 +188,19 @@ export function normalizeCorpusRecord(
       provenance,
       accessScope: record.accessScope,
       ...(record.layout ? { layout: record.layout } : {}),
-      ...(record.metadata ? { metadata: record.metadata } : {})
+      metadata: {
+        ...(record.metadata ?? {}),
+        trustDeclaredTier: trustDecision.declaredTrustTier,
+        trustEffectiveTier: trustDecision.effectiveTrustTier,
+        trustUnsafeUpgrade: trustDecision.unsafeUpgrade,
+        trustDecisionReasons: trustDecision.reasons.join(","),
+        ...(trustDecision.sourceTrustTierFloor === undefined
+          ? {}
+          : { trustSourceFloor: trustDecision.sourceTrustTierFloor }),
+        ...(trustDecision.sourceTrustTierOverride === undefined
+          ? {}
+          : { trustSourceOverride: trustDecision.sourceTrustTierOverride })
+      }
     },
     issues
   };
@@ -230,6 +240,7 @@ export function normalizeCorpusRecords(
       rejectedRecords.push({
         recordId: record ? recordId(record) : "unknown",
         sourceId: record ? stringField(record.sourceId) || context.source.id : context.source.id,
+        rejectedStage: "normalizing",
         reason: summarizeRejection(result.issues)
       });
     }
@@ -392,7 +403,7 @@ function resolveEffectiveTrustTier(
   record: CorpusRecord,
   context: CorpusNormalizationContext,
   issues: CorpusNormalizationIssue[]
-): TrustTier {
+): ReturnType<typeof resolveTrustTierDecision> {
   if (!isTrustTier(record.trustTier)) {
     issues.push({
       severity: "error",
@@ -401,33 +412,30 @@ function resolveEffectiveTrustTier(
       path: "trustTier",
       message: `Unknown trust tier "${record.trustTier}".`
     });
-    return "unknown";
+    return resolveTrustTierDecision({ declaredTrustTier: "unknown" });
   }
 
-  const floor = context.source.trustTierFloor;
-  const override = context.source.trustTierOverride;
-  let effectiveTrustTier = record.trustTier;
+  const decision = resolveTrustTierDecision({
+    declaredTrustTier: record.trustTier,
+    ...(context.source.trustTierFloor === undefined
+      ? {}
+      : { sourceTrustTierFloor: context.source.trustTierFloor }),
+    ...(context.source.trustTierOverride === undefined
+      ? {}
+      : { sourceTrustTierOverride: context.source.trustTierOverride })
+  });
 
-  if (floor && isTrustUpgrade(floor, effectiveTrustTier)) {
-    effectiveTrustTier = floor;
+  if (decision.unsafeUpgrade && decision.sourceTrustTierOverride) {
+    issues.push({
+      severity: "error",
+      code: "unsafe_trust_upgrade",
+      recordId: recordId(record),
+      path: "source.trustTierOverride",
+      message: `Source override cannot upgrade "${decision.effectiveTrustTier}" to "${decision.sourceTrustTierOverride}".`
+    });
   }
 
-  if (override) {
-    if (isTrustUpgrade(effectiveTrustTier, override)) {
-      issues.push({
-        severity: "error",
-        code: "unsafe_trust_upgrade",
-        recordId: recordId(record),
-        path: "source.trustTierOverride",
-        message: `Source override cannot upgrade "${effectiveTrustTier}" to "${override}".`
-      });
-      return effectiveTrustTier;
-    }
-
-    effectiveTrustTier = leastTrustedTier(effectiveTrustTier, override);
-  }
-
-  return effectiveTrustTier;
+  return decision;
 }
 
 function summarizeRejection(issues: readonly CorpusNormalizationIssue[]): string {

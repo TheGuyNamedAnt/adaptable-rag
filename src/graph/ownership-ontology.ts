@@ -2,7 +2,15 @@ import type { GraphOntology } from "./graph-types.js";
 
 export const ownershipGraphOntology: GraphOntology = {
   id: "ownership-v1",
-  entityKinds: ["legal_entity", "organization", "person", "account", "contract", "document"],
+  entityKinds: [
+    "legal_entity",
+    "organization",
+    "person",
+    "account",
+    "contract",
+    "document",
+    "location"
+  ],
   relationKinds: [
     "owns",
     "controls",

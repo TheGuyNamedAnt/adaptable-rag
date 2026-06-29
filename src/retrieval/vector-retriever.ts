@@ -1,7 +1,12 @@
 import type { EmbeddingAdapter } from "../embeddings/embedding-types.js";
+import { embeddingIdentityFor } from "../embeddings/embedding-identity.js";
 import { redactIndexFilterForTrace } from "../indexing/index-filter.js";
 import type { VectorStore } from "../indexing/vector-store.js";
 import { hashText } from "../shared/hash.js";
+import {
+  applyFreshnessRecencyBoostToCandidates,
+  freshnessTraceForCandidates
+} from "./freshness-ranking.js";
 import type { Retriever, RetrieverCapabilities } from "./retriever.js";
 import type {
   RetrievalCandidate,
@@ -55,24 +60,36 @@ export class VectorRetriever implements Retriever {
       );
     }
 
+    const embeddingIdentity = embeddingIdentityFor({
+      provider: embedding.provider,
+      modelName: embedding.modelName,
+      dimensions: embedding.dimensions,
+      adapterId: this.embeddingAdapter.id
+    });
     const vectorResult = await this.vectorStore.findNearestVectors({
       vector: embedding.embeddings[0].vector,
       filter: request.filter,
       topK: request.topK,
+      embeddingModel: embedding.modelName,
+      embeddingProvider: embedding.provider,
+      embeddingConfigHash: embeddingIdentity.embeddingConfigHash,
       ...(request.candidatePoolLimit !== undefined
         ? { candidatePoolLimit: request.candidatePoolLimit }
         : {}),
       ...(request.includeRejected !== undefined ? { includeRejected: request.includeRejected } : {})
     });
 
-    const candidates = vectorResult.candidates.map<RetrievalCandidate>((candidate) => ({
-      chunk: candidate.chunk,
-      score: candidate.score,
-      rank: candidate.rank,
-      matchedTerms: [],
-      citation: candidate.chunk.citation,
-      reasons: candidate.reasons
-    }));
+    const candidates = applyFreshnessRecencyBoostToCandidates(
+      vectorResult.candidates.map<RetrievalCandidate>((candidate) => ({
+        chunk: candidate.chunk,
+        score: candidate.score,
+        rank: candidate.rank,
+        matchedTerms: [],
+        citation: candidate.chunk.citation,
+        reasons: candidate.reasons
+      })),
+      request
+    ).slice(0, request.topK);
     const rejected = vectorResult.rejected.map<RetrievalRejection>((rejection) => ({
       ...(rejection.chunkId ? { chunkId: rejection.chunkId } : {}),
       code: rejection.code,
@@ -152,6 +169,7 @@ function buildTrace(input: {
   readonly candidates: readonly RetrievalCandidate[];
   readonly rejected: readonly RetrievalRejection[];
 }): RetrievalTrace {
+  const freshnessTrace = freshnessTraceForCandidates(input.candidates, input.request);
   return {
     retrievalId: input.retrievalId,
     startedAt: input.startedAt,
@@ -163,6 +181,7 @@ function buildTrace(input: {
     access: redactIndexFilterForTrace(input.request.filter),
     candidatePoolSize: input.candidatePoolSize,
     returnedCount: input.candidates.length,
-    rejectedCount: input.rejected.length
+    rejectedCount: input.rejected.length,
+    ...(freshnessTrace === undefined ? {} : { freshness: freshnessTrace })
   };
 }

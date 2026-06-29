@@ -1,4 +1,10 @@
-import { genericDocsProfile, type CompanyProfile } from "adaptable-rag";
+import {
+  genericDocsProfile,
+  type CompanyDeploymentManifest,
+  type CompanyProfile
+} from "adaptable-rag";
+
+import { companyAdapterPack } from "./company-adapter-pack.js";
 
 export { companyAdapterPack, createCompanyConnectorAdapterPack } from "./company-adapter-pack.js";
 
@@ -51,7 +57,7 @@ export const companyProfile: CompanyProfile = {
       sourceSystem: "company-docs-api",
       useCaseIds: ["docs"],
       contractTestCommand:
-        "npm run company:validate -- --module dist/company/company-profile.js --export companyProfile --adapter-pack-export companyAdapterPack --run-pack-contracts --use-case docs --contract-mode delta --contract-mode full --min-delta-returned-records 1 --disallow-connector-warnings"
+        "npm run company:validate -- --module dist/company/company-profile.js --export companyDeployment --run-pack-contracts --use-case docs --contract-mode delta --contract-mode full --min-delta-returned-records 1 --disallow-connector-warnings"
     }
   ],
   evalPacks: [
@@ -71,5 +77,35 @@ export const companyProfile: CompanyProfile = {
     teamClaim: "team_ids",
     roleClaim: "roles",
     tagClaim: "groups"
+  }
+};
+
+export const companyDeployment: CompanyDeploymentManifest = {
+  company: companyProfile,
+  adapterPacks: [companyAdapterPack],
+  environment: {
+    requiredEnv: ["RAG_DATABASE_URL"],
+    optionalEnv: [
+      "RAG_COMPANY_DEPLOYMENT_EXPORT",
+      "RAG_COMPANY_USE_CASE_ID",
+      "RAG_COMPANY_NAMESPACE_ID",
+      "RAG_COMPANY_PACK_CONTRACT_MODE"
+    ]
+  },
+  evals: {
+    requiredPaths: [
+      "profiles/company-docs/docs/golden.jsonl",
+      "profiles/company-docs/docs/adversarial.jsonl"
+    ],
+    goldenSetPaths: ["profiles/company-docs/docs/golden.jsonl"],
+    adversarialSetPaths: ["profiles/company-docs/docs/adversarial.jsonl"]
+  },
+  smoke: {
+    validateCommand:
+      "npm run company:validate -- --module dist/company/company-profile.js --export companyDeployment --run-pack-contracts --use-case docs --contract-mode delta --contract-mode full --min-delta-returned-records 1 --disallow-connector-warnings",
+    smokeCommand:
+      "npm run company:smoke -- --module dist/company/company-profile.js --export companyDeployment --use-case docs --tenant-id tenant_company_docs --namespace-id company-docs --source-id company_docs_api",
+    postgresSmokeCommand:
+      "npm run company:smoke:postgres -- --module dist/company/company-profile.js --export companyDeployment --use-case docs --tenant-id tenant_company_docs --namespace-id company-docs --source-id company_docs_api"
   }
 };

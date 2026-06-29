@@ -231,7 +231,9 @@ export function redactText(value: string, secrets: readonly string[] = []): stri
   return output
     .replace(/bearer\s+[a-z0-9._-]+/gi, `Bearer ${DEFAULT_REDACTION}`)
     .replace(/api[_-]?key\s*[:=]\s*\S+/gi, `api_key=${DEFAULT_REDACTION}`)
-    .replace(/password\s*=\s*\S+/gi, `password=${DEFAULT_REDACTION}`);
+    .replace(/password\s*[:=]\s*\S+/gi, `password=${DEFAULT_REDACTION}`)
+    .replace(/secret\s*[:=]\s*\S+/gi, `secret=${DEFAULT_REDACTION}`)
+    .replace(/token\s*[:=]\s*\S+/gi, `token=${DEFAULT_REDACTION}`);
 }
 
 export function providerBoundaryTrace(

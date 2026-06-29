@@ -1,8 +1,13 @@
 import type { CitationPointer } from "../documents/provenance.js";
+import { embeddingIdentityFor } from "../embeddings/embedding-identity.js";
 import type { VisualEmbeddingAdapter } from "../embeddings/visual-embedding-types.js";
 import { redactIndexFilterForTrace } from "../indexing/index-filter.js";
 import type { VisualChunkVector, VisualVectorStore } from "../indexing/visual-vector-store.js";
 import { hashText } from "../shared/hash.js";
+import {
+  applyFreshnessRecencyBoostToCandidates,
+  freshnessTraceForCandidates
+} from "./freshness-ranking.js";
 import type { Retriever, RetrieverCapabilities } from "./retriever.js";
 import type {
   RetrievalCandidate,
@@ -14,6 +19,8 @@ import type {
 
 const MAX_TOP_K = 100;
 const MAX_CANDIDATE_POOL_LIMIT = 5000;
+const DEFAULT_CANDIDATE_POOL_MULTIPLIER = 8;
+const DEFAULT_CANDIDATE_POOL_FLOOR = 20;
 
 export interface VisualRetrieverOptions {
   readonly embeddingAdapter: VisualEmbeddingAdapter;
@@ -57,24 +64,44 @@ export class VisualRetriever implements Retriever {
       );
     }
 
+    const embeddingIdentity = embeddingIdentityFor({
+      provider: embedding.provider,
+      modelName: embedding.modelName,
+      dimensions: embedding.dimensions,
+      adapterId: this.embeddingAdapter.id
+    });
+    const candidatePoolLimit =
+      request.candidatePoolLimit ??
+      Math.min(
+        Math.max(request.topK * DEFAULT_CANDIDATE_POOL_MULTIPLIER, DEFAULT_CANDIDATE_POOL_FLOOR),
+        MAX_CANDIDATE_POOL_LIMIT
+      );
+    const vectorTopK = Math.min(candidatePoolLimit, MAX_TOP_K);
     const vectorResult = await this.vectorStore.findNearestVisualVectors({
       vectors: embedding.vectors,
       filter: request.filter,
-      topK: request.topK,
-      ...(request.candidatePoolLimit !== undefined
-        ? { candidatePoolLimit: request.candidatePoolLimit }
-        : {}),
+      topK: vectorTopK,
+      embeddingModel: embedding.modelName,
+      embeddingProvider: embedding.provider,
+      embeddingConfigHash: embeddingIdentity.embeddingConfigHash,
+      candidatePoolLimit,
       ...(request.includeRejected !== undefined ? { includeRejected: request.includeRejected } : {})
     });
 
-    const candidates = vectorResult.candidates.map<RetrievalCandidate>((candidate) => ({
-      chunk: candidate.chunk,
-      score: candidate.score,
-      rank: candidate.rank,
-      matchedTerms: [],
-      citation: visualCitation(candidate.chunk.citation, candidate.visualVector),
-      reasons: candidate.reasons
-    }));
+    const candidates = selectDiverseVisualCandidates(
+      applyFreshnessRecencyBoostToCandidates(
+        vectorResult.candidates.map<RetrievalCandidate>((candidate) => ({
+          chunk: candidate.chunk,
+          score: candidate.score,
+          rank: candidate.rank,
+          matchedTerms: [],
+          citation: visualCitation(candidate.chunk.citation, candidate.visualVector),
+          reasons: candidate.reasons
+        })),
+        request
+      ),
+      request.topK
+    );
     const rejected = vectorResult.rejected.map<RetrievalRejection>((rejection) => ({
       ...(rejection.chunkId ? { chunkId: rejection.chunkId } : {}),
       code: rejection.code,
@@ -97,6 +124,84 @@ export class VisualRetriever implements Retriever {
       })
     };
   }
+}
+
+function selectDiverseVisualCandidates(
+  candidates: readonly RetrievalCandidate[],
+  topK: number
+): readonly RetrievalCandidate[] {
+  let remaining = [...candidates];
+  const selected: RetrievalCandidate[] = [];
+  const selectedDocumentIds = new Set<string>();
+  const selectedVisualAssetIds = new Set<string>();
+
+  while (selected.length < topK && remaining.length > 0) {
+    const next = remaining.sort((first, second) =>
+      compareDiverseVisualCandidates(first, second, selectedDocumentIds, selectedVisualAssetIds)
+    )[0];
+    if (!next) {
+      break;
+    }
+
+    selected.push(next);
+    selectedDocumentIds.add(next.chunk.documentId);
+    if (next.citation.visualAssetId) {
+      selectedVisualAssetIds.add(next.citation.visualAssetId);
+    }
+
+    remaining = remaining.filter((candidate) => candidate.chunk.id !== next.chunk.id);
+  }
+
+  return selected.map((candidate, index) => ({
+    ...candidate,
+    rank: index + 1
+  }));
+}
+
+function compareDiverseVisualCandidates(
+  first: RetrievalCandidate,
+  second: RetrievalCandidate,
+  selectedDocumentIds: ReadonlySet<string>,
+  selectedVisualAssetIds: ReadonlySet<string>
+): number {
+  const firstScore = visualDiversityAdjustedScore(
+    first,
+    selectedDocumentIds,
+    selectedVisualAssetIds
+  );
+  const secondScore = visualDiversityAdjustedScore(
+    second,
+    selectedDocumentIds,
+    selectedVisualAssetIds
+  );
+  if (secondScore !== firstScore) {
+    return secondScore - firstScore;
+  }
+
+  if (first.rank !== second.rank) {
+    return first.rank - second.rank;
+  }
+
+  return first.chunk.id.localeCompare(second.chunk.id);
+}
+
+function visualDiversityAdjustedScore(
+  candidate: RetrievalCandidate,
+  selectedDocumentIds: ReadonlySet<string>,
+  selectedVisualAssetIds: ReadonlySet<string>
+): number {
+  let penalty = 0;
+  if (selectedDocumentIds.has(candidate.chunk.documentId)) {
+    penalty += 0.08;
+  }
+  if (
+    candidate.citation.visualAssetId &&
+    selectedVisualAssetIds.has(candidate.citation.visualAssetId)
+  ) {
+    penalty += 0.08;
+  }
+
+  return Math.round((candidate.score - penalty) * 1000) / 1000;
 }
 
 function validateRequest(request: RetrievalRequest, normalizedQuery: string): void {
@@ -174,6 +279,7 @@ function buildTrace(input: {
   readonly candidates: readonly RetrievalCandidate[];
   readonly rejected: readonly RetrievalRejection[];
 }): RetrievalTrace {
+  const freshnessTrace = freshnessTraceForCandidates(input.candidates, input.request);
   return {
     retrievalId: input.retrievalId,
     startedAt: input.startedAt,
@@ -185,6 +291,7 @@ function buildTrace(input: {
     access: redactIndexFilterForTrace(input.request.filter),
     candidatePoolSize: input.candidatePoolSize,
     returnedCount: input.candidates.length,
-    rejectedCount: input.rejected.length
+    rejectedCount: input.rejected.length,
+    ...(freshnessTrace === undefined ? {} : { freshness: freshnessTrace })
   };
 }

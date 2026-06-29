@@ -76,6 +76,19 @@ test("deepdoc parser supports chat text JSON responses", () => {
   assert.equal(parsed.layout.tables?.[0]?.id, "table_1");
 });
 
+test("deepdoc parser redacts provider warning diagnostics", () => {
+  const parsed = parseDeepDocJsonParserResponse(
+    okResponse({
+      ...payload(),
+      warnings: [{ code: "provider_warning", message: "provider leaked token=super-secret" }]
+    })
+  );
+  const message = parsed.warnings[0]?.message ?? "";
+
+  assert.equal(message.includes("super-secret"), false);
+  assert.match(message, /token=\[REDACTED\]/u);
+});
+
 test("deepdoc parser returns warnings instead of throwing on invalid provider layout", async () => {
   const basePayload = payload();
   assert.equal(typeof basePayload["layout"], "object");

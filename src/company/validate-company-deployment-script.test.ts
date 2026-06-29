@@ -24,6 +24,9 @@ test("validate-company-deployment script exits zero for ready company modules", 
   assert.equal(summary.status, "ready");
   assert.equal(summary.companyId, "acme");
   assert.deepEqual(summary.profiles[0]?.adapterIds, ["acme-support-api"]);
+  assert.equal(summary.deploymentPackage.exportName, "acmeSupportCompanyProfile");
+  assert.equal(summary.deploymentPackage.companyExportPath, "acmeSupportCompanyProfile");
+  assert.equal(summary.deploymentPackage.adapterPackCount, 0);
 });
 
 test("validate-company-deployment script validates full deployment exports through registry", () => {
@@ -44,12 +47,101 @@ test("validate-company-deployment script validates full deployment exports throu
   const summary = JSON.parse(result.stdout);
   assert.equal(summary.status, "ready");
   assert.equal(summary.companyId, "acme");
+  assert.equal(summary.deploymentPackage.exportName, "acmeSupportDeployment");
+  assert.equal(summary.deploymentPackage.companyExportPath, "acmeSupportDeployment.company");
+  assert.deepEqual(summary.deploymentPackage.environment.requiredEnv, ["RAG_DATABASE_URL"]);
+  assert.deepEqual(summary.deploymentPackage.evals.requiredPaths, [
+    "profiles/acme/support/golden.jsonl",
+    "profiles/acme/support/adversarial.jsonl"
+  ]);
+  assert.match(summary.deploymentPackage.smoke.postgresSmokeCommand, /company:smoke:postgres/u);
+  assert.equal(summary.manifestValidation.status, "passed");
+  assert.equal(summary.manifestValidation.checkedEvalPathCount, 2);
+  assert.equal(summary.manifestValidation.checkedSmokeCommandCount, 3);
   assert.equal(summary.adapterPackValidation.status, "passed");
   assert.deepEqual(summary.adapterPackValidation.adapterPackExports, [
     "acmeSupportDeployment.adapterPacks"
   ]);
   assert.equal(summary.adapterPackValidation.adapterPackCount, 1);
   assert.equal(summary.adapterPackValidation.errorCount, 0);
+});
+
+test("validate-company-deployment script can require manifest environment variables", () => {
+  const missingEnv = spawnSync(
+    process.execPath,
+    [
+      "scripts/validate-company-deployment.mjs",
+      "--module",
+      "dist/company/examples/acme-support.company.js",
+      "--export",
+      "acmeSupportDeployment",
+      "--require-manifest-env"
+    ],
+    {
+      encoding: "utf8",
+      env: {
+        PATH: process.env.PATH ?? ""
+      }
+    }
+  );
+
+  assert.equal(missingEnv.status, 1);
+  assert.equal(missingEnv.stderr, "");
+  const missingSummary = JSON.parse(missingEnv.stdout);
+  assert.equal(missingSummary.status, "failed");
+  assert.equal(missingSummary.manifestValidation.status, "failed");
+  assert.equal(missingSummary.manifestValidation.issues[0]?.code, "required_env_missing");
+  assert.doesNotMatch(missingEnv.stdout, /rag_dev_password|postgres:\/\/rag/iu);
+
+  const presentEnv = spawnSync(
+    process.execPath,
+    [
+      "scripts/validate-company-deployment.mjs",
+      "--module",
+      "dist/company/examples/acme-support.company.js",
+      "--export",
+      "acmeSupportDeployment",
+      "--require-manifest-env"
+    ],
+    {
+      encoding: "utf8",
+      env: {
+        PATH: process.env.PATH ?? "",
+        RAG_DATABASE_URL: "postgres://redacted-local-test"
+      }
+    }
+  );
+
+  assert.equal(presentEnv.status, 0, presentEnv.stderr);
+  const presentSummary = JSON.parse(presentEnv.stdout);
+  assert.equal(presentSummary.status, "ready");
+  assert.equal(presentSummary.manifestValidation.status, "passed");
+});
+
+test("validate-company-deployment script fails when manifest eval paths are missing", () => {
+  const modulePath = writeBrokenManifestFixture();
+  const result = spawnSync(
+    process.execPath,
+    [
+      "scripts/validate-company-deployment.mjs",
+      "--module",
+      modulePath,
+      "--export",
+      "brokenManifestDeployment"
+    ],
+    { encoding: "utf8" }
+  );
+
+  assert.equal(result.status, 1);
+  assert.equal(result.stderr, "");
+  const summary = JSON.parse(result.stdout);
+  assert.equal(summary.status, "failed");
+  assert.equal(summary.manifestValidation.status, "failed");
+  assert.equal(summary.manifestValidation.issues[0]?.code, "required_eval_path_missing");
+  assert.doesNotMatch(
+    result.stdout,
+    /rag_dev_password|postgres:\/\/rag|leaked-secret|Unsafe body text/iu
+  );
 });
 
 test("validate-company-deployment script runs connector contracts from adapter pack exports", () => {
@@ -82,12 +174,12 @@ test("validate-company-deployment script runs connector contracts from adapter p
   assert.equal(summary.status, "ready");
   assert.equal(summary.connectorContracts.status, "passed");
   assert.deepEqual(summary.connectorContracts.adapterPackExports, ["acmeSupportAdapterPack"]);
-  assert.equal(summary.connectorContracts.adapterPackValidation.warningCount, 1);
+  assert.equal(summary.connectorContracts.adapterPackValidation.warningCount, 0);
   assert.equal(
     summary.connectorContracts.adapterPackValidation.issues.some(
       (issue: { readonly code: string }) => issue.code === "permission_mapper_missing"
     ),
-    true
+    false
   );
   assert.equal(summary.connectorContracts.checkedUseCaseCount, 1);
   assert.equal(summary.connectorContracts.checkedConnectorCount, 1);
@@ -166,14 +258,15 @@ test("validate-company-deployment script runs full pack contracts", () => {
   assert.deepEqual(summary.packContracts.adapterPackExports, ["acmeSupportAdapterPack"]);
   assert.equal(summary.packContracts.checkedAdapterCount, 1);
   assert.equal(summary.packContracts.checkedConnectorCount, 1);
+  assert.equal(summary.packContracts.checkedPermissionMapperCount, 1);
   assert.equal(summary.packContracts.checkedParserCount, 0);
-  assert.equal(summary.packContracts.checkedCaseCount, 2);
+  assert.equal(summary.packContracts.checkedCaseCount, 3);
   assert.equal(
     summary.packContracts.issues.some(
       (issue: { readonly upstreamCode?: string }) =>
         issue.upstreamCode === "permission_mapper_missing"
     ),
-    true
+    false
   );
 });
 
@@ -396,5 +489,30 @@ export const unsafeAdapterPack = {
 `,
     "utf8"
   );
+  return fixturePath;
+}
+
+function writeBrokenManifestFixture(): string {
+  const fixtureDir = path.join(process.cwd(), ".rag", "company-script-tests");
+  mkdirSync(fixtureDir, { recursive: true });
+  const fixturePath = path.join(fixtureDir, "broken-manifest.mjs");
+  const acmeUrl = pathToFileURL(
+    path.join(process.cwd(), "dist", "company", "examples", "acme-support.company.js")
+  ).href;
+  writeFileSync(
+    fixturePath,
+    `import { acmeSupportDeployment } from ${JSON.stringify(acmeUrl)};
+
+export const brokenManifestDeployment = {
+  ...acmeSupportDeployment,
+  evals: {
+    ...acmeSupportDeployment.evals,
+    requiredPaths: ["profiles/acme/support/missing-required-eval.jsonl"]
+  }
+};
+`,
+    "utf8"
+  );
+
   return fixturePath;
 }

@@ -1,5 +1,9 @@
 import { redactIndexFilterForTrace } from "../indexing/index-filter.js";
 import { hashText } from "../shared/hash.js";
+import {
+  applyFreshnessRecencyBoostToCandidates,
+  freshnessTraceForCandidates
+} from "./freshness-ranking.js";
 import { selectPreferredGraphEvidence } from "./graph-evidence.js";
 import type { Retriever, RetrieverCapabilities } from "./retriever.js";
 import { DEFAULT_RRF_K, mergeCandidatesByRrf } from "./rrf.js";
@@ -121,31 +125,40 @@ export class HybridRetriever implements Retriever {
       rrfK: this.rrfK
     });
     const rejected = dedupeRejections([...keywordResult.rejected, ...vectorResult.rejected]);
-    const ranked = mergedPool
-      .filter((candidate) => {
-        if (candidate.score > 0) {
-          return true;
-        }
+    const ranked = applyFreshnessRecencyBoostToCandidates(
+      mergedPool
+        .filter((candidate) => {
+          if (candidate.score > 0) {
+            return true;
+          }
 
-        if (request.includeRejected) {
-          rejected.push({
-            chunkId: candidate.chunk.id,
-            code: "no_hybrid_match",
-            reason: "Merged keyword and vector scores did not produce a positive hybrid score."
-          });
-        }
-        return false;
-      })
-      .sort(compareMergedCandidates)
+          if (request.includeRejected) {
+            rejected.push({
+              chunkId: candidate.chunk.id,
+              code: "no_hybrid_match",
+              reason: "Merged keyword and vector scores did not produce a positive hybrid score."
+            });
+          }
+          return false;
+        })
+        .sort(compareMergedCandidates)
+        .map<RetrievalCandidate>((candidate, index) => ({
+          chunk: candidate.chunk,
+          score: candidate.score,
+          rank: index + 1,
+          matchedTerms: candidate.matchedTerms,
+          citation: candidate.citation,
+          reasons: candidate.reasons,
+          ...(candidate.graphEvidence === undefined
+            ? {}
+            : { graphEvidence: candidate.graphEvidence })
+        })),
+      request
+    )
       .slice(0, request.topK)
       .map<RetrievalCandidate>((candidate, index) => ({
-        chunk: candidate.chunk,
-        score: candidate.score,
-        rank: index + 1,
-        matchedTerms: candidate.matchedTerms,
-        citation: candidate.citation,
-        reasons: candidate.reasons,
-        ...(candidate.graphEvidence === undefined ? {} : { graphEvidence: candidate.graphEvidence })
+        ...candidate,
+        rank: index + 1
       }));
 
     return {
@@ -389,6 +402,7 @@ function buildTrace(input: {
   readonly rejected: readonly RetrievalRejection[];
   readonly fusionStrategy: HybridFusionStrategy;
 }): RetrievalTrace {
+  const freshnessTrace = freshnessTraceForCandidates(input.candidates, input.request);
   return {
     retrievalId: input.retrievalId,
     startedAt: input.startedAt,
@@ -405,7 +419,8 @@ function buildTrace(input: {
     returnedCount: input.candidates.length,
     rejectedCount: input.rejected.length,
     fusionStrategy: input.fusionStrategy,
-    childRetrievalIds: [input.keywordTrace.retrievalId, input.vectorTrace.retrievalId]
+    childRetrievalIds: [input.keywordTrace.retrievalId, input.vectorTrace.retrievalId],
+    ...(freshnessTrace === undefined ? {} : { freshness: freshnessTrace })
   };
 }
 

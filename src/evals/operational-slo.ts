@@ -86,7 +86,19 @@ export function ragOperationalSloSignals(input: RagOperationalSloInput): readonl
       signal("http.answerFailed", input.httpMetrics.answerFailed, "requests"),
       signal("http.rateLimited", input.httpMetrics.rateLimited, "requests"),
       signal("http.authDenied", input.httpMetrics.authDenied, "requests"),
-      signal("http.activeRequests", input.httpMetrics.activeRequests, "requests")
+      signal("http.activeRequests", input.httpMetrics.activeRequests, "requests"),
+      signal("http.latencyMs.p95", input.httpMetrics.latencyMs.p95, "ms"),
+      signal("http.latencyMs.p99", input.httpMetrics.latencyMs.p99, "ms"),
+      signal("rag.answerCount", input.httpMetrics.rag.answerCount, "answers"),
+      signal("rag.lowCitationAnswerCount", input.httpMetrics.rag.lowCitationAnswerCount, "answers"),
+      signal("rag.noEvidenceAnswerCount", input.httpMetrics.rag.noEvidenceAnswerCount, "answers"),
+      signal(
+        "rag.humanReviewRequiredCount",
+        input.httpMetrics.rag.humanReviewRequiredCount,
+        "answers"
+      ),
+      signal("rag.modelLatencyMs.p95", input.httpMetrics.rag.modelLatencyMs.p95, "ms"),
+      signal("rag.estimatedCostUsd", input.httpMetrics.rag.estimatedCostUsd, "USD")
     );
   }
 
@@ -432,6 +444,109 @@ export function ragOperationalSloRules(input: RagOperationalSloInput): readonly 
             "Preserve rate limit logs for abuse investigation if needed."
           ],
           "Escalate if trusted production traffic is being throttled."
+        )
+      },
+      {
+        id: "http_latency_p95",
+        name: "HTTP p95 latency stays below budget",
+        category: "http_edge",
+        severity: "warning",
+        signalName: "http.latencyMs.p95",
+        comparator: "lte",
+        threshold: 30000,
+        description:
+          "Sustained high edge latency can hide provider, retrieval, or storage pressure.",
+        runbook: runbook(
+          "Review HTTP latency",
+          "The HTTP p95 latency exceeded the operational budget.",
+          [
+            "Compare /metrics route latency summaries for answer versus health/readiness.",
+            "Check provider smoke and storage readiness for slow dependencies.",
+            "Inspect recent answer traces for retrieval and generation stage duration changes."
+          ],
+          "Escalate when latency affects production users or coincides with provider errors."
+        )
+      },
+      {
+        id: "rag_low_citation_answers",
+        name: "No low-citation answers",
+        category: "rag_quality",
+        severity: "high",
+        signalName: "rag.lowCitationAnswerCount",
+        comparator: "lte",
+        threshold: 0,
+        description: "Answers without citations indicate grounding or response-shaping drift.",
+        runbook: runbook(
+          "Review low-citation answers",
+          "At least one answer completed without final citations.",
+          [
+            "Inspect linked answer traces for context evidence and generation status.",
+            "Check whether retrieval returned chunks but citation resolution failed.",
+            "Add a regression case for the profile if this was not an expected refusal."
+          ],
+          "Escalate when citation loss affects customer-visible answers."
+        )
+      },
+      {
+        id: "rag_no_evidence_answers",
+        name: "No no-evidence answer attempts",
+        category: "rag_quality",
+        severity: "warning",
+        signalName: "rag.noEvidenceAnswerCount",
+        comparator: "lte",
+        threshold: 0,
+        description:
+          "No-evidence answers show retrieval coverage, source freshness, or query routing gaps.",
+        runbook: runbook(
+          "Review no-evidence answers",
+          "The context builder reported no evidence for at least one answer request.",
+          [
+            "Check retrieval returned count and rejected retrieval count in /metrics.",
+            "Inspect source sync freshness and index coverage for the affected profile.",
+            "Decide whether to improve ingestion, retrieval, or refusal copy."
+          ],
+          "Escalate if no-evidence answers spike for a production workflow."
+        )
+      },
+      {
+        id: "rag_human_review_required",
+        name: "No human-review spike",
+        category: "rag_quality",
+        severity: "warning",
+        signalName: "rag.humanReviewRequiredCount",
+        comparator: "lte",
+        threshold: 0,
+        description: "Human-review volume is expected in some workflows but should be visible.",
+        runbook: runbook(
+          "Review human-review volume",
+          "At least one answer required human review.",
+          [
+            "Check review queue artifacts for routing and profile escalation metadata.",
+            "Inspect whether warnings came from evidence, model, grounding judge, or budgets.",
+            "Tune profile policy only after confirming the risk boundary."
+          ],
+          "Escalate to the owning workflow team when review volume affects operations."
+        )
+      },
+      {
+        id: "rag_model_latency_p95",
+        name: "Model p95 latency stays below budget",
+        category: "provider_health",
+        severity: "warning",
+        signalName: "rag.modelLatencyMs.p95",
+        comparator: "lte",
+        threshold: 30000,
+        description:
+          "High model latency usually points to provider, network, or prompt-size pressure.",
+        runbook: runbook(
+          "Review model latency",
+          "The model p95 latency exceeded the operational budget.",
+          [
+            "Compare model latency to overall HTTP latency to isolate provider time.",
+            "Check provider smoke and provider status.",
+            "Inspect prompt/context token counts and retrieval candidate volumes."
+          ],
+          "Escalate when model latency causes user-visible timeouts."
         )
       }
     );

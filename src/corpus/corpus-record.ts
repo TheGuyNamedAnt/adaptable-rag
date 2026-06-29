@@ -4,6 +4,7 @@ import type { SourceSensitivity, TrustTier } from "../documents/trust-tier.js";
 import type { AccessScope } from "../security/access-scope.js";
 
 export type CorpusRecordMetadata = Readonly<Record<string, string | number | boolean>>;
+export type CorpusRecordRejectionStage = "normalizing" | "chunking" | "indexing";
 
 export interface CorpusRecord {
   readonly id: string;
@@ -26,5 +27,6 @@ export interface CorpusRecord {
 export interface RejectedCorpusRecord {
   readonly recordId: string;
   readonly sourceId: string;
+  readonly rejectedStage: CorpusRecordRejectionStage;
   readonly reason: string;
 }

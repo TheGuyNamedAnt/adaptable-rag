@@ -42,6 +42,7 @@ export interface IngestionJobCounts {
   readonly adapterWarnings: number;
   readonly normalizationIssues: number;
   readonly parserQualityWarnings: number;
+  readonly searchableArtifactWarnings?: number;
   readonly chunkingWarnings: number;
 }
 
@@ -109,6 +110,11 @@ export interface IngestionCheckpointRecord {
   readonly recordedAt: string;
 }
 
+export interface IngestionCheckpointListFilter {
+  readonly limit?: number;
+  readonly offset?: number;
+}
+
 export interface SaveIngestionCheckpointInput {
   readonly jobId: string;
   readonly stage: IngestionJobStage;
@@ -119,7 +125,10 @@ export interface SaveIngestionCheckpointInput {
 export interface IngestionCheckpointStore {
   save(input: SaveIngestionCheckpointInput): Promise<IngestionCheckpointRecord>;
   latest(jobId: string): Promise<IngestionCheckpointRecord | undefined>;
-  list(jobId: string): Promise<readonly IngestionCheckpointRecord[]>;
+  list(
+    jobId: string,
+    filter?: IngestionCheckpointListFilter
+  ): Promise<readonly IngestionCheckpointRecord[]>;
 }
 
 export interface IngestionSourceProgressRecord {
@@ -134,6 +143,12 @@ export interface IngestionSourceProgressRecord {
   readonly finishedAt?: string;
   readonly updatedAt: string;
   readonly errorMessage?: string;
+}
+
+export interface IngestionSourceProgressListFilter {
+  readonly sourceId?: string;
+  readonly limit?: number;
+  readonly offset?: number;
 }
 
 export interface UpdateIngestionSourceProgressInput {
@@ -158,10 +173,19 @@ export interface IngestionDocumentProgressRecord {
   readonly chunkCount: number;
   readonly retryable: boolean;
   readonly attempt: number;
+  readonly failureStage?: IngestionJobStage;
+  readonly failurePhase?: string;
   readonly startedAt?: string;
   readonly finishedAt?: string;
   readonly updatedAt: string;
   readonly errorMessage?: string;
+}
+
+export interface IngestionDocumentProgressListFilter {
+  readonly sourceId?: string;
+  readonly statuses?: readonly IngestionDocumentStatus[];
+  readonly limit?: number;
+  readonly offset?: number;
 }
 
 export interface UpdateIngestionDocumentProgressInput {
@@ -172,6 +196,8 @@ export interface UpdateIngestionDocumentProgressInput {
   readonly chunkCount?: number;
   readonly retryable?: boolean;
   readonly attempt?: number;
+  readonly failureStage?: IngestionJobStage;
+  readonly failurePhase?: string;
   readonly startedAt?: string;
   readonly finishedAt?: string;
   readonly updatedAt: string;
@@ -183,8 +209,14 @@ export interface IngestionProgressStore {
   updateDocument(
     input: UpdateIngestionDocumentProgressInput
   ): Promise<IngestionDocumentProgressRecord>;
-  listSources(jobId: string): Promise<readonly IngestionSourceProgressRecord[]>;
-  listDocuments(jobId: string): Promise<readonly IngestionDocumentProgressRecord[]>;
+  listSources(
+    jobId: string,
+    filter?: IngestionSourceProgressListFilter
+  ): Promise<readonly IngestionSourceProgressRecord[]>;
+  listDocuments(
+    jobId: string,
+    filter?: IngestionDocumentProgressListFilter
+  ): Promise<readonly IngestionDocumentProgressRecord[]>;
 }
 
 export class InMemoryIngestionJobStore implements IngestionJobStore {
@@ -270,8 +302,11 @@ export class InMemoryIngestionCheckpointStore implements IngestionCheckpointStor
     return this.checkpoints.get(jobId)?.at(-1);
   }
 
-  async list(jobId: string): Promise<readonly IngestionCheckpointRecord[]> {
-    return this.checkpoints.get(jobId) ?? [];
+  async list(
+    jobId: string,
+    filter: IngestionCheckpointListFilter = {}
+  ): Promise<readonly IngestionCheckpointRecord[]> {
+    return applyListPage(this.checkpoints.get(jobId) ?? [], filter);
   }
 }
 
@@ -312,6 +347,10 @@ export class InMemoryIngestionProgressStore implements IngestionProgressStore {
     const startedAt = input.startedAt ?? existing?.startedAt;
     const finishedAt = input.finishedAt ?? existing?.finishedAt;
     const errorMessage = input.errorMessage ?? existing?.errorMessage;
+    const failureStage =
+      input.status === "failed" ? (input.failureStage ?? existing?.failureStage) : undefined;
+    const failurePhase =
+      input.status === "failed" ? (input.failurePhase ?? existing?.failurePhase) : undefined;
     const record: IngestionDocumentProgressRecord = {
       jobId: input.jobId,
       sourceId: input.sourceId,
@@ -320,6 +359,8 @@ export class InMemoryIngestionProgressStore implements IngestionProgressStore {
       chunkCount: input.chunkCount ?? existing?.chunkCount ?? 0,
       retryable: input.retryable ?? existing?.retryable ?? false,
       attempt: input.attempt ?? existing?.attempt ?? 1,
+      ...(failureStage === undefined ? {} : { failureStage }),
+      ...(failurePhase === undefined ? {} : { failurePhase }),
       ...(startedAt === undefined ? {} : { startedAt }),
       ...(finishedAt === undefined ? {} : { finishedAt }),
       updatedAt: input.updatedAt,
@@ -329,20 +370,31 @@ export class InMemoryIngestionProgressStore implements IngestionProgressStore {
     return record;
   }
 
-  async listSources(jobId: string): Promise<readonly IngestionSourceProgressRecord[]> {
-    return [...this.sources.values()]
+  async listSources(
+    jobId: string,
+    filter: IngestionSourceProgressListFilter = {}
+  ): Promise<readonly IngestionSourceProgressRecord[]> {
+    const rows = [...this.sources.values()]
       .filter((record) => record.jobId === jobId)
+      .filter((record) => filter.sourceId === undefined || record.sourceId === filter.sourceId)
       .sort((first, second) => first.sourceId.localeCompare(second.sourceId));
+    return applyListPage(rows, filter);
   }
 
-  async listDocuments(jobId: string): Promise<readonly IngestionDocumentProgressRecord[]> {
-    return [...this.documents.values()]
+  async listDocuments(
+    jobId: string,
+    filter: IngestionDocumentProgressListFilter = {}
+  ): Promise<readonly IngestionDocumentProgressRecord[]> {
+    const rows = [...this.documents.values()]
       .filter((record) => record.jobId === jobId)
+      .filter((record) => filter.sourceId === undefined || record.sourceId === filter.sourceId)
+      .filter((record) => filter.statuses === undefined || filter.statuses.includes(record.status))
       .sort(
         (first, second) =>
           first.sourceId.localeCompare(second.sourceId) ||
           first.documentId.localeCompare(second.documentId)
       );
+    return applyListPage(rows, filter);
   }
 }
 
@@ -508,12 +560,17 @@ export class PostgresIngestionCheckpointStore implements IngestionCheckpointStor
     return result.rows[0] === undefined ? undefined : checkpointFromRow(result.rows[0]);
   }
 
-  async list(jobId: string): Promise<readonly IngestionCheckpointRecord[]> {
+  async list(
+    jobId: string,
+    filter: IngestionCheckpointListFilter = {}
+  ): Promise<readonly IngestionCheckpointRecord[]> {
     const result = await this.pool.query<IngestionCheckpointRow>(
       `select * from ${this.q("ingestion_checkpoints")}
        where job_id = $1
-       order by sequence asc`,
-      [jobId]
+       order by sequence asc
+       offset $2
+       limit $3`,
+      [jobId, listOffset(filter.offset), listLimit(filter.limit)]
     );
     return result.rows.map(checkpointFromRow);
   }
@@ -586,16 +643,22 @@ export class PostgresIngestionProgressStore implements IngestionProgressStore {
     input: UpdateIngestionDocumentProgressInput
   ): Promise<IngestionDocumentProgressRecord> {
     const existing = await this.getDocument(input.jobId, input.sourceId, input.documentId);
+    const failureStage =
+      input.status === "failed" ? (input.failureStage ?? existing?.failureStage ?? null) : null;
+    const failurePhase =
+      input.status === "failed" ? (input.failurePhase ?? existing?.failurePhase ?? null) : null;
     const result = await this.pool.query<IngestionDocumentProgressRow>(
       `insert into ${this.q("ingestion_document_progress")} (
         job_id, source_id, document_id, status, chunk_count, retryable, attempt,
-        started_at, finished_at, updated_at, error_message
-      ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        failure_stage, failure_phase, started_at, finished_at, updated_at, error_message
+      ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
       on conflict (job_id, source_id, document_id) do update set
         status = excluded.status,
         chunk_count = excluded.chunk_count,
         retryable = excluded.retryable,
         attempt = excluded.attempt,
+        failure_stage = excluded.failure_stage,
+        failure_phase = excluded.failure_phase,
         started_at = excluded.started_at,
         finished_at = excluded.finished_at,
         updated_at = excluded.updated_at,
@@ -609,6 +672,8 @@ export class PostgresIngestionProgressStore implements IngestionProgressStore {
         input.chunkCount ?? existing?.chunkCount ?? 0,
         input.retryable ?? existing?.retryable ?? false,
         input.attempt ?? existing?.attempt ?? 1,
+        failureStage,
+        failurePhase,
         input.startedAt ?? existing?.startedAt ?? null,
         input.finishedAt ?? existing?.finishedAt ?? null,
         input.updatedAt,
@@ -618,22 +683,41 @@ export class PostgresIngestionProgressStore implements IngestionProgressStore {
     return documentProgressFromRow(requireDocumentProgressRow(result.rows[0], input.jobId));
   }
 
-  async listSources(jobId: string): Promise<readonly IngestionSourceProgressRecord[]> {
+  async listSources(
+    jobId: string,
+    filter: IngestionSourceProgressListFilter = {}
+  ): Promise<readonly IngestionSourceProgressRecord[]> {
     const result = await this.pool.query<IngestionSourceProgressRow>(
       `select * from ${this.q("ingestion_source_progress")}
        where job_id = $1
-       order by source_id asc`,
-      [jobId]
+         and ($2::text is null or source_id = $2)
+       order by source_id asc
+       offset $3
+       limit $4`,
+      [jobId, filter.sourceId ?? null, listOffset(filter.offset), listLimit(filter.limit)]
     );
     return result.rows.map(sourceProgressFromRow);
   }
 
-  async listDocuments(jobId: string): Promise<readonly IngestionDocumentProgressRecord[]> {
+  async listDocuments(
+    jobId: string,
+    filter: IngestionDocumentProgressListFilter = {}
+  ): Promise<readonly IngestionDocumentProgressRecord[]> {
     const result = await this.pool.query<IngestionDocumentProgressRow>(
       `select * from ${this.q("ingestion_document_progress")}
        where job_id = $1
-       order by source_id asc, document_id asc`,
-      [jobId]
+         and ($2::text is null or source_id = $2)
+         and ($3::text[] is null or status = any($3::text[]))
+       order by source_id asc, document_id asc
+       offset $4
+       limit $5`,
+      [
+        jobId,
+        filter.sourceId ?? null,
+        filter.statuses ?? null,
+        listOffset(filter.offset),
+        listLimit(filter.limit)
+      ]
     );
     return result.rows.map(documentProgressFromRow);
   }
@@ -717,6 +801,8 @@ interface IngestionDocumentProgressRow {
   readonly chunk_count: number;
   readonly retryable: boolean;
   readonly attempt: number;
+  readonly failure_stage: IngestionJobStage | null;
+  readonly failure_phase: string | null;
   readonly started_at: Date | string | null;
   readonly finished_at: Date | string | null;
   readonly updated_at: Date | string;
@@ -782,6 +868,8 @@ function documentProgressFromRow(
     chunkCount: row.chunk_count,
     retryable: row.retryable,
     attempt: row.attempt,
+    ...(row.failure_stage === null ? {} : { failureStage: row.failure_stage }),
+    ...(row.failure_phase === null ? {} : { failurePhase: row.failure_phase }),
     ...(row.started_at === null ? {} : { startedAt: dateString(row.started_at) }),
     ...(row.finished_at === null ? {} : { finishedAt: dateString(row.finished_at) }),
     updatedAt: dateString(row.updated_at),
@@ -832,6 +920,23 @@ function requireDocumentProgressRow(
 
 function dateString(value: Date | string): string {
   return value instanceof Date ? value.toISOString() : value;
+}
+
+function applyListPage<T>(
+  rows: readonly T[],
+  filter: { readonly limit?: number; readonly offset?: number }
+): readonly T[] {
+  const offset = listOffset(filter.offset);
+  const limit = filter.limit === undefined ? undefined : Math.max(0, Math.trunc(filter.limit));
+  return limit === undefined ? rows.slice(offset) : rows.slice(offset, offset + limit);
+}
+
+function listOffset(value: number | undefined): number {
+  return value === undefined ? 0 : Math.max(0, Math.trunc(value));
+}
+
+function listLimit(value: number | undefined): number | null {
+  return value === undefined ? null : Math.max(0, Math.trunc(value));
 }
 
 function assertSafeIdentifier(value: string, label: string): string {

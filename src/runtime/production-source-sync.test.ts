@@ -19,6 +19,11 @@ import type {
 import { InMemorySourceSyncLedgerStore } from "../sync/sync-ledger.js";
 import { FIXED_NOW, TEST_PRINCIPAL, makeIndexFilter } from "../test-support/fixtures.js";
 import { createProductionRagApp, type ProductionRagAppConfig } from "./production-app.js";
+import {
+  InMemoryIngestionCheckpointStore,
+  InMemoryIngestionJobStore,
+  InMemoryIngestionProgressStore
+} from "./ingestion-job.js";
 import { createProductionSourceSyncRuntime } from "./production-source-sync.js";
 
 const source: CorpusSourceConfig = {
@@ -68,6 +73,9 @@ test("production source sync runtime assembles app stores, ledger, and vector in
   const index = new InMemoryRagIndex({ now: () => FIXED_NOW });
   const vectorStore = new InMemoryVectorStore({ chunkStore: index, dimensions: 4 });
   const ledgerStore = new InMemorySourceSyncLedgerStore();
+  const jobStore = new InMemoryIngestionJobStore();
+  const checkpointStore = new InMemoryIngestionCheckpointStore();
+  const progressStore = new InMemoryIngestionProgressStore();
   const transport = new DynamicEmbeddingTransport();
   const connector = new FixtureConnector({
     sourceId: source.id,
@@ -94,6 +102,9 @@ test("production source sync runtime assembles app stores, ledger, and vector in
   const runtime = createProductionSourceSyncRuntime({
     app,
     connector,
+    jobStore,
+    checkpointStore,
+    progressStore,
     now: () => FIXED_NOW
   });
 
@@ -120,6 +131,20 @@ test("production source sync runtime assembles app stores, ledger, and vector in
   });
   assert.equal(saved?.cursor, "cursor_1");
   assert.equal(connector.requests[0]?.previousCursor, undefined);
+  assert.equal((await jobStore.get("production_source_sync_ingest"))?.status, "completed");
+  assert.equal(
+    (await checkpointStore.list("production_source_sync_ingest")).some(
+      (checkpoint) => checkpoint.checkpoint["phase"] === "post_ingest_started"
+    ),
+    true
+  );
+  assert.deepEqual(
+    (await progressStore.listDocuments("production_source_sync_ingest")).map((document) => [
+      document.documentId,
+      document.status
+    ]),
+    [["doc_policy", "accepted"]]
+  );
 });
 
 function productionConfig(): ProductionRagAppConfig {

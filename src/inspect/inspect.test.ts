@@ -46,7 +46,13 @@ test("inspectIngestionRun returns job checkpoints and failed document rollups", 
   await checkpointStore.save({
     jobId: "job_1",
     stage: "chunking",
-    checkpoint: { documentId: "doc_policy" },
+    checkpoint: { phase: "chunking_started", documentId: "doc_policy" },
+    recordedAt: FIXED_NOW
+  });
+  await checkpointStore.save({
+    jobId: "job_1",
+    stage: "indexing",
+    checkpoint: { phase: "document_indexed", documentId: "doc_policy" },
     recordedAt: FIXED_NOW
   });
   await progressStore.updateSource({
@@ -72,6 +78,8 @@ test("inspectIngestionRun returns job checkpoints and failed document rollups", 
     documentId: "doc_failed",
     status: "failed",
     retryable: true,
+    failureStage: "parsing",
+    failurePhase: "parser_timeout",
     errorMessage: "Parser timed out.",
     updatedAt: FIXED_NOW
   });
@@ -91,12 +99,47 @@ test("inspectIngestionRun returns job checkpoints and failed document rollups", 
   });
 
   assert.equal(inspected.job?.status, "completed_with_warnings");
-  assert.equal(inspected.latestCheckpoint?.stage, "chunking");
+  assert.equal(inspected.summary.status, "completed_with_warnings");
+  assert.equal(inspected.summary.currentCheckpointPhase, "document_indexed");
+  assert.equal(inspected.latestCheckpoint?.stage, "indexing");
+  assert.equal(inspected.counts.checkpointCount, 2);
   assert.equal(inspected.counts.failedDocumentCount, 1);
   assert.equal(inspected.counts.skippedDocumentCount, 1);
   assert.equal(inspected.counts.acceptedDocumentCount, 1);
   assert.equal(inspected.counts.retryableFailureCount, 1);
   assert.equal(inspected.failedDocuments[0]?.documentId, "doc_failed");
+  assert.equal(inspected.failedDocuments[0]?.failureStage, "parsing");
+  assert.equal(inspected.failedDocuments[0]?.failurePhase, "parser_timeout");
+
+  const failedPage = await inspectIngestionRun({
+    jobId: "job_1",
+    jobStore,
+    checkpointStore,
+    progressStore,
+    documentStatuses: ["failed"],
+    checkpointLimit: 1,
+    documentLimit: 1
+  });
+
+  assert.equal(failedPage.checkpoints.length, 1);
+  assert.equal(failedPage.documents.length, 1);
+  assert.equal(failedPage.documents[0]?.documentId, "doc_failed");
+  assert.equal(failedPage.page.checkpointHasMore, true);
+  assert.equal(failedPage.page.documentHasMore, false);
+  assert.deepEqual(failedPage.page.documentStatuses, ["failed"]);
+});
+
+test("inspectIngestionRun fails clearly for missing jobs", async () => {
+  const jobStore = new InMemoryIngestionJobStore();
+
+  await assert.rejects(
+    () =>
+      inspectIngestionRun({
+        jobId: "missing_job",
+        jobStore
+      }),
+    /Ingestion job "missing_job" was not found/
+  );
 });
 
 test("inspectSourceHealth classifies failed source progress", async () => {

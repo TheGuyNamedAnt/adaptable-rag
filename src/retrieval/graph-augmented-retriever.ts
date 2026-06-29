@@ -9,6 +9,10 @@ import type {
 } from "../graph/graph-store.js";
 import { hashText } from "../shared/hash.js";
 import {
+  applyFreshnessRecencyBoostToCandidates,
+  freshnessTraceForCandidates
+} from "./freshness-ranking.js";
+import {
   selectPreferredGraphEvidence,
   type RetrievalGraphEntityReference,
   type RetrievalGraphPathEdgeEvidence,
@@ -122,11 +126,15 @@ export class GraphAugmentedRetriever implements Retriever {
     );
     const graphCandidates = graphResults.flatMap((result) => result.candidates);
     const graphStrategy = graphLimits.maxDepth > 1 ? "graph_multi_hop" : "graph_one_hop";
-    const merged = mergeBaseAndGraphCandidates(
-      base.candidates,
-      graphCandidates,
-      request.graph?.executionMode ?? "expand"
+    const merged = applyFreshnessRecencyBoostToCandidates(
+      mergeBaseAndGraphCandidates(
+        base.candidates,
+        graphCandidates,
+        request.graph?.executionMode ?? "expand"
+      ),
+      request
     ).slice(0, request.topK);
+    const freshnessTrace = freshnessTraceForCandidates(merged, request);
 
     return {
       query: base.query,
@@ -157,7 +165,8 @@ export class GraphAugmentedRetriever implements Retriever {
         fusionStrategy: base.trace.fusionStrategy
           ? `${base.trace.fusionStrategy}+${graphStrategy}`
           : graphStrategy,
-        childRetrievalIds: base.trace.childRetrievalIds ?? [base.trace.retrievalId]
+        childRetrievalIds: base.trace.childRetrievalIds ?? [base.trace.retrievalId],
+        ...(freshnessTrace === undefined ? {} : { freshness: freshnessTrace })
       }
     };
   }

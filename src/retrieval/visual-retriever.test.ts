@@ -6,6 +6,7 @@ import {
   FakeVisualEmbeddingAdapter,
   visualVectorsForText
 } from "../embeddings/fake-visual-embedding-adapter.js";
+import { embeddingIdentityFor } from "../embeddings/embedding-identity.js";
 import type { RagChunk } from "../documents/chunk.js";
 import type { RagDocument } from "../documents/document.js";
 import type { LayoutBox } from "../documents/layout.js";
@@ -71,6 +72,42 @@ test("retrieves visual matches with layout citations and redacted trace fields",
   assert.equal(result.trace.retrievalId, "visual_retrieval_test");
   assert.deepEqual(result.trace.searchTermHashes, []);
   assert.equal(result.trace.returnedCount, 2);
+});
+
+test("visual retrieval expands the pool and avoids duplicate visual chunks", async () => {
+  const { retriever, chunkIndex, vectorStore, adapter } = makeVisualRetriever([
+    makeDocument({
+      id: "doc_invoice_dashboard",
+      body: "Invoice dashboard screenshot shows overdue balances and payment status."
+    }),
+    makeDocument({
+      id: "doc_invoice_trace",
+      body: "Invoice dashboard trace keeps visual citations and finance review evidence."
+    })
+  ]);
+  const firstChunk = chunkIndex.snapshot().chunks[0]?.chunk;
+  assert.ok(firstChunk);
+  vectorStore.addVisualChunkVectors([
+    {
+      ...vectorForChunk(firstChunk, adapter),
+      id: `visual_duplicate_${firstChunk.id}`,
+      visualAssetId: "asset_duplicate_invoice_dashboard"
+    }
+  ]);
+
+  const result = await retriever.retrieve({
+    query: "invoice dashboard visual finance review",
+    filter: makeIndexFilter(),
+    topK: 2,
+    retrievalId: "visual_diverse_pool_test",
+    requestedAt: FIXED_NOW
+  });
+
+  assert.equal(new Set(result.candidates.map((candidate) => candidate.chunk.id)).size, 2);
+  assert.deepEqual(
+    new Set(result.candidates.map((candidate) => candidate.chunk.documentId)),
+    new Set(["doc_invoice_dashboard", "doc_invoice_trace"])
+  );
 });
 
 test("advertises honest visual-only retrieval capabilities", () => {
@@ -180,6 +217,7 @@ function makeVisualRetriever(documents: readonly RagDocument[]): {
   readonly retriever: VisualRetriever;
   readonly chunkIndex: InMemoryRagIndex;
   readonly vectorStore: InMemoryVisualVectorStore;
+  readonly adapter: FakeVisualEmbeddingAdapter;
 } {
   const chunkIndex = new InMemoryRagIndex({ now: () => FIXED_NOW });
   const chunks: RagChunk[] = [];
@@ -196,9 +234,7 @@ function makeVisualRetriever(documents: readonly RagDocument[]): {
     dimensions: adapter.dimensions,
     now: () => FIXED_NOW
   });
-  vectorStore.addVisualChunkVectors(
-    chunks.map((chunk) => vectorForChunk(chunk, adapter.dimensions))
-  );
+  vectorStore.addVisualChunkVectors(chunks.map((chunk) => vectorForChunk(chunk, adapter)));
 
   return {
     retriever: new VisualRetriever({
@@ -207,11 +243,18 @@ function makeVisualRetriever(documents: readonly RagDocument[]): {
       now: () => FIXED_NOW
     }),
     chunkIndex,
-    vectorStore
+    vectorStore,
+    adapter
   };
 }
 
-function vectorForChunk(chunk: RagChunk, dimensions: number): VisualChunkVector {
+function vectorForChunk(chunk: RagChunk, adapter: FakeVisualEmbeddingAdapter): VisualChunkVector {
+  const identity = embeddingIdentityFor({
+    provider: adapter.provider,
+    modelName: adapter.modelName,
+    dimensions: adapter.dimensions,
+    adapterId: adapter.id
+  });
   return {
     id: `visual_${chunk.id}`,
     chunkId: chunk.id,
@@ -219,9 +262,11 @@ function vectorForChunk(chunk: RagChunk, dimensions: number): VisualChunkVector 
     tenantId: chunk.accessScope.tenantId,
     namespaceId: chunk.namespaceId,
     textHash: chunk.textHash,
-    embeddingModel: "test-visual",
-    dimensions,
-    vectors: visualVectorsForText(chunk.text, dimensions),
+    embeddingModel: adapter.modelName,
+    embeddingProvider: adapter.provider,
+    embeddingConfigHash: identity.embeddingConfigHash,
+    dimensions: adapter.dimensions,
+    vectors: visualVectorsForText(chunk.text, adapter.dimensions),
     embeddedAt: FIXED_NOW,
     visualAssetId: `asset_${chunk.id}`,
     visualAsset: {

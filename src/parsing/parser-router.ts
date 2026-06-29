@@ -6,6 +6,7 @@ import type {
   DocumentParserWarning,
   ParserInputMode
 } from "./parser.js";
+import { safeParserDiagnosticMessage } from "./parser-diagnostics.js";
 
 export type ParserRouterTier =
   | "fast_native"
@@ -24,6 +25,9 @@ export interface ParserRouterCandidate {
 
 export interface ParserRouterPolicy {
   readonly requireLayout?: boolean;
+  readonly requireLayoutContentTypes?: readonly string[];
+  readonly requireTables?: boolean;
+  readonly requireVisualAssets?: boolean;
   readonly preferLayout?: boolean;
   readonly preferTables?: boolean;
   readonly preferVisualAssets?: boolean;
@@ -52,6 +56,7 @@ export interface ParserRouterAttemptTrace {
   readonly hasLayout?: boolean;
   readonly tableCount?: number;
   readonly visualAssetCount?: number;
+  readonly parserFailed?: boolean;
   readonly reasons?: readonly string[];
 }
 
@@ -78,11 +83,18 @@ interface ParseAssessment {
   readonly hasLayout: boolean;
   readonly tableCount: number;
   readonly visualAssetCount: number;
+  readonly parserFailed: boolean;
 }
 
 interface CandidateEligibility {
   readonly eligible: boolean;
   readonly reasons: readonly string[];
+}
+
+interface AcceptedCandidate {
+  readonly result: DocumentParseResult;
+  readonly candidate: ParserRouterCandidate;
+  readonly assessment: ParseAssessment;
 }
 
 export class DocumentParserRouter implements DocumentParser {
@@ -116,6 +128,7 @@ export class DocumentParserRouter implements DocumentParser {
     const attempts: ParserRouterAttemptTrace[] = [];
     const maxAttempts = this.policy.maxAttempts ?? this.candidates.length;
     let attempted = 0;
+    let bestAccepted: AcceptedCandidate | undefined;
 
     for (const [candidateIndex, candidate] of this.candidates.entries()) {
       const eligibility = candidateEligibility(candidate, request, this.policy);
@@ -136,26 +149,33 @@ export class DocumentParserRouter implements DocumentParser {
       attempted += 1;
       try {
         const result = await candidate.parser.parse(request);
-        const assessment = assessParseResult(result, candidate, this.policy);
+        const assessment = assessParseResult(result, candidate, request, this.policy);
 
         if (assessment.accepted) {
-          const acceptedAttempts = [
-            ...attempts,
+          attempts.push(
             attemptTrace(candidate, "accepted", {
               qualityScore: assessment.qualityScore,
               bodyCharacters: assessment.bodyCharacters,
               hasLayout: assessment.hasLayout,
               tableCount: assessment.tableCount,
               visualAssetCount: assessment.visualAssetCount,
-              reasons: ["satisfied parser router policy"]
-            }),
-            ...remainingCandidateTraces(
-              this.candidates.slice(candidateIndex + 1),
-              request,
-              this.policy
-            )
-          ];
-          return this.routeResult(result, candidate, attempted, failures, acceptedAttempts);
+              parserFailed: assessment.parserFailed,
+              reasons: ["satisfied parser router required policy"]
+            })
+          );
+          const accepted = { result, candidate, assessment };
+          bestAccepted = betterAcceptedCandidate(bestAccepted, accepted);
+          if (shouldReturnAcceptedImmediately(assessment, this.policy)) {
+            return this.routeResult(result, candidate, attempted, failures, [
+              ...attempts,
+              ...remainingCandidateTraces(
+                this.candidates.slice(candidateIndex + 1),
+                request,
+                this.policy
+              )
+            ]);
+          }
+          continue;
         }
 
         attempts.push(
@@ -165,6 +185,7 @@ export class DocumentParserRouter implements DocumentParser {
             hasLayout: assessment.hasLayout,
             tableCount: assessment.tableCount,
             visualAssetCount: assessment.visualAssetCount,
+            parserFailed: assessment.parserFailed,
             reasons: assessment.reasons
           })
         );
@@ -178,6 +199,7 @@ export class DocumentParserRouter implements DocumentParser {
           qualityScore: assessment.qualityScore
         });
       } catch (error) {
+        const message = safeParserDiagnosticMessage(error);
         attempts.push(
           attemptTrace(candidate, "failed", {
             reasons: [`parser failed during parse with ${errorName(error)}`]
@@ -187,9 +209,19 @@ export class DocumentParserRouter implements DocumentParser {
           parserId: candidate.parser.id,
           tier: candidate.tier,
           code: "parser_router_attempt_failed",
-          message: error instanceof Error ? error.message : String(error)
+          message
         });
       }
+    }
+
+    if (bestAccepted) {
+      return this.routeResult(
+        bestAccepted.result,
+        bestAccepted.candidate,
+        attempted,
+        failures,
+        attempts
+      );
     }
 
     const detail =
@@ -241,6 +273,49 @@ export class DocumentParserRouter implements DocumentParser {
       warnings: [...failureWarnings(failures), ...result.warnings]
     };
   }
+}
+
+function shouldReturnAcceptedImmediately(
+  assessment: ParseAssessment,
+  policy: ParserRouterPolicy
+): boolean {
+  if (!hasSoftPreferences(policy)) {
+    return true;
+  }
+  return assessment.qualityScore >= 100;
+}
+
+function hasSoftPreferences(policy: ParserRouterPolicy): boolean {
+  return (
+    policy.preferLayout === true ||
+    policy.preferTables === true ||
+    policy.preferVisualAssets === true
+  );
+}
+
+function betterAcceptedCandidate(
+  current: AcceptedCandidate | undefined,
+  next: AcceptedCandidate
+): AcceptedCandidate {
+  if (!current) {
+    return next;
+  }
+  const delta =
+    next.assessment.qualityScore - current.assessment.qualityScore ||
+    Number(next.assessment.hasLayout) - Number(current.assessment.hasLayout) ||
+    next.assessment.tableCount - current.assessment.tableCount ||
+    next.assessment.visualAssetCount - current.assessment.visualAssetCount;
+  if (delta !== 0) {
+    return delta > 0 ? next : current;
+  }
+
+  const rankDelta = compareCandidates(current.candidate, next.candidate);
+  if (rankDelta !== 0) {
+    return rankDelta > 0 ? next : current;
+  }
+
+  const bodyDelta = next.assessment.bodyCharacters - current.assessment.bodyCharacters;
+  return bodyDelta > 0 ? next : current;
 }
 
 function compareCandidates(a: ParserRouterCandidate, b: ParserRouterCandidate): number {
@@ -342,29 +417,46 @@ function withinByteLimit(
 function assessParseResult(
   result: DocumentParseResult,
   candidate: ParserRouterCandidate,
+  request: DocumentParseRequest,
   policy: ParserRouterPolicy
 ): ParseAssessment {
   const reasons: string[] = [];
   const minimumBodyCharacters =
     candidate.minimumBodyCharacters ?? policy.minimumBodyCharacters ?? 1;
-  const bodyLength = result.document.body.trim().length;
+  const bodyLength = meaningfulBodyText(result.document.body).length;
   const hasLayout = result.document.layout !== undefined;
   const tableCount = result.document.layout?.tables?.length ?? 0;
   const visualAssetCount = result.document.layout?.visualAssets?.length ?? 0;
-  if (bodyLength < minimumBodyCharacters) {
+  const parserFailed = result.document.metadata?.["parserFailed"] === true;
+  if (parserFailed) {
+    reasons.push("parser reported failure");
+  }
+
+  const acceptsVisualOnlyImage =
+    bodyLength < minimumBodyCharacters &&
+    visualAssetCount > 0 &&
+    isImageContentType(request.contentType);
+  if (bodyLength < minimumBodyCharacters && !acceptsVisualOnlyImage) {
     reasons.push(`body had ${bodyLength} character(s), below ${minimumBodyCharacters}`);
   }
 
-  if ((candidate.requireLayout === true || policy.requireLayout === true) && !hasLayout) {
+  const layoutRequired =
+    candidate.requireLayout === true ||
+    policy.requireLayout === true ||
+    requiresLayoutForContentType(policy, request.contentType);
+  const tablesPreferred =
+    policy.preferTables === true && shouldPreferTablesForResult(request, result.document.body);
+
+  if (layoutRequired && !hasLayout) {
     reasons.push("layout was required but missing");
   }
 
-  if (policy.preferTables === true && tableCount === 0) {
-    reasons.push("tables were preferred but none were emitted");
+  if (policy.requireTables === true && tableCount === 0) {
+    reasons.push("tables were required but none were emitted");
   }
 
-  if (policy.preferVisualAssets === true && visualAssetCount === 0) {
-    reasons.push("visual assets were preferred but none were emitted");
+  if (policy.requireVisualAssets === true && visualAssetCount === 0) {
+    reasons.push("visual assets were required but none were emitted");
   }
 
   return {
@@ -373,18 +465,91 @@ function assessParseResult(
     qualityScore: parseQualityScore({
       bodyCharacters: bodyLength,
       minimumBodyCharacters,
-      layoutRequired: candidate.requireLayout === true || policy.requireLayout === true,
+      layoutRequired,
       hasLayout,
-      tablesRequired: policy.preferTables === true,
+      layoutPreferred: policy.preferLayout === true,
+      tablesRequired: policy.requireTables === true,
+      tablesPreferred,
       tableCount,
-      visualAssetsRequired: policy.preferVisualAssets === true,
-      visualAssetCount
+      visualAssetsRequired: policy.requireVisualAssets === true,
+      visualAssetsPreferred: policy.preferVisualAssets === true,
+      visualAssetCount,
+      parserFailed
     }),
     bodyCharacters: bodyLength,
     hasLayout,
     tableCount,
-    visualAssetCount
+    visualAssetCount,
+    parserFailed
   };
+}
+
+function requiresLayoutForContentType(
+  policy: ParserRouterPolicy,
+  contentType: string | undefined
+): boolean {
+  if (!contentType || !policy.requireLayoutContentTypes?.length) {
+    return false;
+  }
+
+  return policy.requireLayoutContentTypes.some((requiredContentType) =>
+    requiredContentType.endsWith("/*")
+      ? contentType.startsWith(requiredContentType.slice(0, requiredContentType.length - 1))
+      : contentType === requiredContentType
+  );
+}
+
+function isImageContentType(contentType: string | undefined): boolean {
+  return contentType?.toLowerCase().startsWith("image/") === true;
+}
+
+function shouldPreferTablesForResult(request: DocumentParseRequest, body: string): boolean {
+  const contentType = request.contentType;
+  if (isNativeTableContentType(contentType)) {
+    return true;
+  }
+  if (isStructuredMarkupContentType(contentType)) {
+    return false;
+  }
+
+  const lines = body
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (hasConsistentPipeRows(lines)) {
+    return true;
+  }
+  if (lines.filter((line) => line.split(",").length >= 3).length >= 3) {
+    return true;
+  }
+  return /\b(cap table|capitalization table|balance sheet|income statement|row total|column total)\b/iu.test(
+    body
+  );
+}
+
+function isNativeTableContentType(contentType: string | undefined): boolean {
+  return [
+    "text/csv",
+    "text/tab-separated-values",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.ms-excel.sheet.macroEnabled.12"
+  ].includes(contentType ?? "");
+}
+
+function isStructuredMarkupContentType(contentType: string | undefined): boolean {
+  return [
+    "application/json",
+    "application/x-ndjson",
+    "application/yaml",
+    "application/xml",
+    "text/xml"
+  ].includes(contentType ?? "");
+}
+
+function hasConsistentPipeRows(lines: readonly string[]): boolean {
+  const pipeRows = lines.filter((line) => line.includes("|"));
+  const pipeCounts = new Set(pipeRows.map((line) => line.split("|").length));
+  return pipeRows.length >= 2 && pipeCounts.size <= 2;
 }
 
 function parseQualityScore(input: {
@@ -392,12 +557,20 @@ function parseQualityScore(input: {
   readonly minimumBodyCharacters: number;
   readonly layoutRequired: boolean;
   readonly hasLayout: boolean;
+  readonly layoutPreferred: boolean;
   readonly tablesRequired: boolean;
+  readonly tablesPreferred: boolean;
   readonly tableCount: number;
   readonly visualAssetsRequired: boolean;
+  readonly visualAssetsPreferred: boolean;
   readonly visualAssetCount: number;
+  readonly parserFailed: boolean;
 }): number {
   let score = 100;
+
+  if (input.parserFailed) {
+    score -= 60;
+  }
 
   if (input.bodyCharacters < input.minimumBodyCharacters) {
     const ratio =
@@ -409,15 +582,36 @@ function parseQualityScore(input: {
     score -= 25;
   }
 
+  if (input.layoutPreferred && !input.hasLayout) {
+    score -= 10;
+  }
+
   if (input.tablesRequired && input.tableCount === 0) {
     score -= 20;
+  }
+
+  if (input.tablesPreferred && input.tableCount === 0) {
+    score -= 8;
   }
 
   if (input.visualAssetsRequired && input.visualAssetCount === 0) {
     score -= 20;
   }
 
+  if (input.visualAssetsPreferred && input.visualAssetCount === 0) {
+    score -= 8;
+  }
+
   return Math.max(0, Math.min(100, score));
+}
+
+function meaningfulBodyText(body: string): string {
+  return body
+    .replace(/<!--\s*(?:image|figure|picture|page image|diagram|chart)?\s*-->/giu, " ")
+    .replace(/<img\b[^>]*>/giu, " ")
+    .replace(/!\[[^\]]*\]\([^)]+\)/gu, " ")
+    .replace(/&nbsp;/giu, " ")
+    .trim();
 }
 
 function attemptTrace(

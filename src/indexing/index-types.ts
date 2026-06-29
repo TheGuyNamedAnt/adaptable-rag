@@ -3,6 +3,7 @@ import type { RagDocument } from "../documents/document.js";
 import type { SourceKind } from "../documents/provenance.js";
 import type { TrustTier } from "../documents/trust-tier.js";
 import type { RequestPrincipal } from "../security/access-scope.js";
+import type { StorageScaleCapabilities } from "./scale-capabilities.js";
 
 export type IndexOverwriteMode = "reject" | "replace";
 
@@ -89,4 +90,5 @@ export interface IndexCapabilities {
   readonly supportsKeywordScan: boolean;
   readonly supportsVectorSearch: boolean;
   readonly supportsHybridSearch: boolean;
+  readonly scale?: StorageScaleCapabilities;
 }

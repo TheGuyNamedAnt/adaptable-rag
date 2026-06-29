@@ -9,6 +9,7 @@ import type {
   ContextCandidateAssessment,
   ContextEvidenceStatus,
   ContextEvidenceSummary,
+  ContextQueryIntent,
   ContextRejection,
   ContextRejectionCode,
   ContextTrace
@@ -60,13 +61,18 @@ export class ContextBuilder {
     let redactionCount = 0;
 
     const optimized = this.optimizer.optimize(
-      orderCandidatesForContext(request.retrieval.candidates, request.profile),
+      orderCandidatesForContext(request.retrieval.candidates, request.profile, request.queryIntent),
       request.profile
     );
     rejected.push(...optimized.rejected);
 
     for (const candidate of optimized.candidates) {
-      const rejectionCode = rejectCandidate(candidate, request.profile, this.now());
+      const rejectionCode = rejectCandidate(
+        candidate,
+        request.profile,
+        this.now(),
+        request.queryIntent
+      );
       if (rejectionCode) {
         rejected.push(rejection(candidate, rejectionCode.code, rejectionCode.reason));
         continue;
@@ -212,7 +218,8 @@ function validateRequest(request: ContextBuildRequest): void {
 function rejectCandidate(
   candidate: RetrievalCandidate,
   profile: RagProfile,
-  now: string
+  now: string,
+  queryIntent?: ContextQueryIntent
 ): { readonly code: ContextRejectionCode; readonly reason: string } | undefined {
   const chunk = candidate.chunk;
 
@@ -246,7 +253,7 @@ function rejectCandidate(
     };
   }
 
-  const freshnessRejection = rejectStaleCandidate(chunk, profile, now);
+  const freshnessRejection = rejectStaleCandidate(chunk, profile, now, queryIntent);
   if (freshnessRejection) {
     return freshnessRejection;
   }
@@ -274,16 +281,23 @@ function rejectCandidate(
 function rejectStaleCandidate(
   chunk: RagChunk,
   profile: RagProfile,
-  now: string
+  now: string,
+  queryIntent?: ContextQueryIntent
 ): { readonly code: ContextRejectionCode; readonly reason: string } | undefined {
-  if (profile.freshnessPolicy.mode === "none") {
+  const freshnessRequested = isFreshnessIntent(queryIntent);
+  if (profile.freshnessPolicy.mode === "none" && !freshnessRequested) {
     return undefined;
   }
 
-  if (profile.freshnessPolicy.requireCapturedAt && !chunk.provenance.capturedAt?.trim()) {
+  if (
+    (profile.freshnessPolicy.requireCapturedAt || freshnessRequested) &&
+    !chunk.provenance.capturedAt?.trim()
+  ) {
     return {
       code: "missing_freshness_metadata",
-      reason: "Chunk source is missing capturedAt required by the profile freshness policy."
+      reason: freshnessRequested
+        ? "Chunk source is missing capturedAt required by the freshness query intent."
+        : "Chunk source is missing capturedAt required by the profile freshness policy."
     };
   }
 
@@ -504,14 +518,17 @@ function graphEvidenceTrace(blocks: readonly ContextBlock[]): {
 
 function orderCandidatesForContext(
   candidates: readonly RetrievalCandidate[],
-  profile: RagProfile
+  profile: RagProfile,
+  queryIntent?: ContextQueryIntent
 ): readonly RetrievalCandidate[] {
+  const freshnessRequested = isFreshnessIntent(queryIntent);
   const hasSourceTagPolicy =
     (profile.retrieval.preferSourceTags?.length ?? 0) > 0 ||
     (profile.retrieval.avoidSourceTagsUnlessNeeded?.length ?? 0) > 0;
   if (
     !profile.contextBudget.preferTrustedSources &&
     !profile.contextBudget.preferRecentSources &&
+    !freshnessRequested &&
     !hasSourceTagPolicy
   ) {
     return candidates;
@@ -547,7 +564,7 @@ function orderCandidatesForContext(
       }
     }
 
-    if (profile.contextBudget.preferRecentSources) {
+    if (profile.contextBudget.preferRecentSources || freshnessRequested) {
       const recencyDelta = sourceTimestamp(second.chunk) - sourceTimestamp(first.chunk);
       if (recencyDelta !== 0) {
         return recencyDelta;
@@ -556,6 +573,18 @@ function orderCandidatesForContext(
 
     return first.rank - second.rank;
   });
+}
+
+function isFreshnessIntent(queryIntent: ContextQueryIntent | undefined): boolean {
+  if (!queryIntent) {
+    return false;
+  }
+
+  return (
+    queryIntent.primary === "freshness" ||
+    (queryIntent.secondary ?? []).includes("freshness") ||
+    (queryIntent.sourceHints ?? []).includes("recent")
+  );
 }
 
 function sourceTagMatchCount(chunk: RagChunk, tags: readonly string[]): number {

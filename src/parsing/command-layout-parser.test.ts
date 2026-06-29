@@ -60,6 +60,23 @@ test("command layout parser falls back with a warning when runner output is inva
   assert.equal(result.warnings[0]?.code, "command_layout_failed");
 });
 
+test("command layout parser redacts runner failure diagnostics", async () => {
+  const parser = new CommandLayoutParser({
+    command: { executable: "bad-wrapper" },
+    runner: async () => {
+      throw new Error("docling failed token=super-secret password=hunter2");
+    }
+  });
+
+  const result = await parser.parse(request);
+  const message = result.warnings[0]?.message ?? "";
+
+  assert.equal(result.document.metadata?.["parserFailed"], true);
+  assert.equal(message.includes("super-secret"), false);
+  assert.equal(message.includes("hunter2"), false);
+  assert.match(message, /token=\[REDACTED\]/u);
+});
+
 test("command input describes the normalized visual layout contract", () => {
   const input = buildCommandInput(request);
 

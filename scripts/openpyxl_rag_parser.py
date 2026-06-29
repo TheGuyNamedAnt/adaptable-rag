@@ -38,9 +38,9 @@ def parse_with_openpyxl(request: dict[str, Any]) -> dict[str, Any]:
 
     source_path, cleanup_dir = materialize_source(request)
     try:
-        workbook = load_workbook(source_path, data_only=True, read_only=True)
-        formula_workbook = load_workbook(source_path, data_only=False, read_only=True)
-        asset_workbook = load_workbook(source_path, data_only=False, read_only=False)
+        workbook = load_workbook(source_path, data_only=True, read_only=False)
+        formula_workbook = load_workbook(source_path, data_only=False, read_only=False)
+        asset_workbook = formula_workbook
         asset_dir = asset_output_directory(request, source_path)
         sheets = []
         body_parts = []
@@ -54,9 +54,21 @@ def parse_with_openpyxl(request: dict[str, Any]) -> dict[str, Any]:
         ):
             rows, row_warnings = materialized_rows(sheet, formula_sheet)
             warnings.extend(row_warnings)
-            if not rows:
-                continue
             sheet_state = str(getattr(formula_sheet, "sheet_state", "visible") or "visible")
+            asset_sheet = asset_workbook[sheet.title] if sheet.title in asset_workbook.sheetnames else None
+            sheet_visual_assets = (
+                visual_assets_for_sheet(
+                    asset_sheet=asset_sheet,
+                    page_number=sheet_index,
+                    sheet_name=sheet.title,
+                    sheet_state=sheet_state,
+                    asset_dir=asset_dir,
+                )
+                if asset_sheet is not None
+                else []
+            )
+            visual_assets.extend(sheet_visual_assets)
+
             sheet_title = f"# {sheet.title}"
             body_parts.append(sheet_title)
             title_start = offset
@@ -74,39 +86,59 @@ def parse_with_openpyxl(request: dict[str, Any]) -> dict[str, Any]:
             )
             offset += 2
 
-            table_text = "\n".join(" | ".join(cell for cell in row["values"]) for row in rows)
-            body_parts.append(table_text)
-            table_start = offset
-            offset += len(table_text)
-            region_id = f"sheet_{sheet_index}_table_region"
-            regions.append(
-                {
-                    "id": region_id,
-                    "kind": "table",
-                    "pageNumber": sheet_index,
-                    "text": table_text,
-                    "characterStart": table_start,
-                    "characterEnd": offset,
-                    "metadata": {"sheetName": sheet.title, "sheetState": sheet_state},
-                }
-            )
-            offset += 2
+            if rows:
+                table_text = "\n".join(" | ".join(cell for cell in row["values"]) for row in rows)
+                body_parts.append(table_text)
+                table_start = offset
+                offset += len(table_text)
+                region_id = f"sheet_{sheet_index}_table_region"
+                regions.append(
+                    {
+                        "id": region_id,
+                        "kind": "table",
+                        "pageNumber": sheet_index,
+                        "text": table_text,
+                        "characterStart": table_start,
+                        "characterEnd": offset,
+                        "metadata": {"sheetName": sheet.title, "sheetState": sheet_state},
+                    }
+                )
+                offset += 2
 
-            tables.append(
-                {
-                    "id": f"sheet_{sheet_index}_table",
-                    "pageNumber": sheet_index,
-                    "regionId": region_id,
-                    "cells": table_cells(rows),
-                    "summary": table_text[:500],
-                    "metadata": {
-                        "sheetName": sheet.title,
-                        "sheetState": sheet_state,
-                        "maxRow": sheet.max_row,
-                        "maxColumn": sheet.max_column,
-                    },
-                }
-            )
+                tables.append(
+                    {
+                        "id": f"sheet_{sheet_index}_table",
+                        "pageNumber": sheet_index,
+                        "regionId": region_id,
+                        "cells": table_cells(rows),
+                        "summary": table_text[:500],
+                        "metadata": {
+                            "sheetName": sheet.title,
+                            "sheetState": sheet_state,
+                            "maxRow": sheet.max_row,
+                            "maxColumn": sheet.max_column,
+                        },
+                    }
+                )
+
+            if sheet_visual_assets:
+                asset_text = "\n".join(visual_asset_summary(asset) for asset in sheet_visual_assets)
+                body_parts.append(asset_text)
+                asset_start = offset
+                offset += len(asset_text)
+                regions.append(
+                    {
+                        "id": f"sheet_{sheet_index}_visual_assets",
+                        "kind": "figure_caption",
+                        "pageNumber": sheet_index,
+                        "text": asset_text,
+                        "characterStart": asset_start,
+                        "characterEnd": offset,
+                        "metadata": {"sheetName": sheet.title, "sheetState": sheet_state},
+                    }
+                )
+                offset += 2
+
             sheets.append(
                 {
                     "name": sheet.title,
@@ -114,46 +146,34 @@ def parse_with_openpyxl(request: dict[str, Any]) -> dict[str, Any]:
                     "pageNumber": sheet_index,
                     "rowCount": len(rows),
                     "columnCount": max_width(rows),
+                    "visualAssetCount": len(sheet_visual_assets),
                 }
             )
-            asset_sheet = asset_workbook[sheet.title] if sheet.title in asset_workbook.sheetnames else None
-            if asset_sheet is not None:
-                visual_assets.extend(
-                    visual_assets_for_sheet(
-                        asset_sheet=asset_sheet,
-                        page_number=sheet_index,
-                        sheet_name=sheet.title,
-                        sheet_state=sheet_state,
-                        asset_dir=asset_dir,
-                    )
-                )
 
-        body = "\n\n".join(body_parts)
+        has_material_content = any(
+            sheet["rowCount"] > 0 or sheet["visualAssetCount"] > 0 for sheet in sheets
+        )
+        if not has_material_content:
+            body = ""
+            regions = []
+            tables = []
+        else:
+            body = "\n\n".join(body_parts)
         layout = {
             "parserId": "openpyxl-rag-parser",
             "strategy": "table_structure",
             "pages": [
                 {
                     "pageNumber": sheet["pageNumber"],
-                    "width": max(1, sheet["columnCount"]),
-                    "height": max(1, sheet["rowCount"]),
+                    "width": 1,
+                    "height": 1,
                     "unit": "normalized",
                     "metadata": {"sheetName": sheet["name"], "sheetState": sheet["state"]},
                 }
                 for sheet in sheets
             ]
             or [{"pageNumber": 1, "width": 1, "height": 1, "unit": "normalized"}],
-            "regions": regions
-            or [
-                {
-                    "id": "empty_workbook",
-                    "kind": "table",
-                    "pageNumber": 1,
-                    "text": body,
-                    "characterStart": 0,
-                    "characterEnd": len(body),
-                }
-            ],
+            "regions": regions,
             "tables": tables,
             "visualAssets": visual_assets,
             "metadata": {
@@ -172,8 +192,8 @@ def parse_with_openpyxl(request: dict[str, Any]) -> dict[str, Any]:
                 "visualAssetCount": len(visual_assets),
             },
             "warnings": warnings
-            if sheets
-            else [{"code": "empty_workbook", "message": "No non-empty sheets were parsed."}],
+            if body.strip()
+            else [{"code": "empty_workbook", "message": "No worksheet content was parsed."}],
         }
     finally:
         if cleanup_dir is not None:
@@ -182,13 +202,13 @@ def parse_with_openpyxl(request: dict[str, Any]) -> dict[str, Any]:
 
 def materialize_source(request: dict[str, Any]) -> tuple[Path, tempfile.TemporaryDirectory[str] | None]:
     path = request.get("path")
-    if isinstance(path, str) and path and Path(path).exists():
+    if isinstance(path, str) and path and local_path_allowed(Path(path)):
         return Path(path), None
 
     origin_uri = request.get("originUri")
     if isinstance(origin_uri, str) and origin_uri.startswith("file://"):
         file_path = Path(origin_uri.removeprefix("file://"))
-        if file_path.exists():
+        if local_path_allowed(file_path):
             return file_path, None
 
     cleanup_dir = tempfile.TemporaryDirectory(prefix="openpyxl-rag-")
@@ -199,7 +219,27 @@ def materialize_source(request: dict[str, Any]) -> tuple[Path, tempfile.Temporar
         source_path.write_bytes(base64.b64decode(bytes_base64))
         return source_path, cleanup_dir
 
-    raise ValueError("OpenPyXL parser requires path, file:// originUri, or bytesBase64.")
+    raise ValueError(
+        "OpenPyXL parser requires an allowed path, allowed file:// originUri, or bytesBase64."
+    )
+
+
+def local_path_allowed(path: Path) -> bool:
+    if not path.exists():
+        return False
+    if os.environ.get("RAG_PARSER_ALLOW_LOCAL_PATHS", "").lower() not in {"1", "true", "yes"}:
+        return False
+    roots = [entry for entry in os.environ.get("RAG_PARSER_ALLOWED_ROOTS", "").split(os.pathsep) if entry]
+    if not roots:
+        return True
+    resolved = path.resolve()
+    for root in roots:
+        try:
+            resolved.relative_to(Path(root).resolve())
+            return True
+        except ValueError:
+            continue
+    return False
 
 
 def materialized_rows(value_sheet: Any, formula_sheet: Any) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
@@ -216,17 +256,20 @@ def materialized_rows(value_sheet: Any, formula_sheet: Any) -> tuple[list[dict[s
         ):
             text = cell_text(value)
             formula_text = cell_text(getattr(formula_cell, "value", None))
-            if text == "" and formula_text.startswith("="):
-                text = formula_text
-                warnings.append(
-                    {
-                        "code": "formula_without_cached_value",
-                        "message": (
-                            f"Formula at {formula_sheet.title}!R{row_number}C{column_number} "
-                            "had no cached calculated value; emitted formula text."
-                        ),
-                    }
-                )
+            if formula_text.startswith("="):
+                if text == "":
+                    text = formula_text
+                    warnings.append(
+                        {
+                            "code": "formula_without_cached_value",
+                            "message": (
+                                f"Formula at {formula_sheet.title}!R{row_number}C{column_number} "
+                                "had no cached calculated value; emitted formula text."
+                            ),
+                        }
+                    )
+                elif text != formula_text:
+                    text = f"{text} ({formula_text})"
             values.append(text)
         while values and values[-1] == "":
             values.pop()
@@ -323,6 +366,19 @@ def visual_assets_for_sheet(
         )
 
     return assets
+
+
+def visual_asset_summary(asset: dict[str, Any]) -> str:
+    metadata = asset.get("metadata") if isinstance(asset.get("metadata"), dict) else {}
+    parts = [
+        "Visual asset",
+        str(asset.get("id") or ""),
+        str(metadata.get("assetType") or asset.get("kind") or ""),
+        str(metadata.get("chartType") or ""),
+        str(metadata.get("title") or ""),
+        str(metadata.get("anchorCell") or ""),
+    ]
+    return " ".join(part for part in parts if part).strip()
 
 
 def asset_output_directory(request: dict[str, Any], source_path: Path) -> Path:

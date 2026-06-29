@@ -12,6 +12,7 @@ The connector pack may read company-owned APIs, databases, file services, admin 
 
 - `CompanyProfile` with use cases, namespaces, corpus sources, connectors, eval packs, and permission mapping
 - `CompanyAdapterPack` with corpus adapters, source connectors, permission mappers, and connector test commands
+- `CompanyDeploymentManifest` that bundles the company profile, adapter packs, required env names, eval paths, and smoke commands
 - `CorpusRecord` values with stable ids, source ids, checksums, trust tier, sensitivity, and mapped access scopes
 - `SourceConnector` sync results with full/delta mode, stable source item ids, cursors, complete full-sync markers, deletes, and retryable errors
 
@@ -19,7 +20,7 @@ It must not emit raw source bodies into ledgers, raw native ACL payloads into tr
 
 ## Files
 
-- `src/company-profile.ts`: copyable company profile and use-case/source declarations
+- `src/company-profile.ts`: copyable company profile, use-case/source declarations, and `companyDeployment` manifest export
 - `src/company-adapter-pack.ts`: copyable adapter pack with corpus adapter, source connector, and permission mapper
 - `src/company-connector-pack.test.ts`: contract test that runs the company connector gate
 - `profiles/company-docs/docs/*.jsonl`: starter golden and adversarial eval cases matching the profile paths
@@ -31,20 +32,22 @@ It must not emit raw source bodies into ledgers, raw native ACL payloads into tr
 3. Replace `CompanyDocsItem` and `CompanyDocsNativeAcl` with safe projections from the source system.
 4. Keep raw source credentials, raw ACL payloads, and principal claims out of returned records, warnings, ledgers, and traces.
 5. Update `companyProfile` ids, namespace, eval paths, corpus source ids, connector ids, and principal roles/tags.
-6. Keep `createCompanyConnectorAdapterPack()` as the adapter-pack export used by deployment validation.
-7. Keep the contract fixture behavior intact while replacing the client:
+6. Keep `companyDeployment` as the install export used by deployment validation and production startup.
+7. Keep `createCompanyConnectorAdapterPack()` available for tests and advanced pack overrides.
+8. Keep the contract fixture behavior intact while replacing the client:
    - `listDocuments()` should page through current approved records for adapter contract tests.
    - `listChangedDocuments({ mode: "delta" })` should return at least one changed record and a cursor.
    - `listChangedDocuments({ mode: "full" })` should use the prior cursor when provided and return `complete: true` for a full snapshot.
    - Delete events must include `recordId`; missing records in a complete full sync become tombstones through the generic sync runner.
    - `sourceAcl` must be a redacted fingerprint only. Never return raw native ACL blobs.
-8. Run the contract test locally, then wire the packaged validator into CI:
+9. Run the contract test locally, then wire the packaged validator into CI:
 
 ```bash
 npm run company:validate -- \
   --module dist/company/company-profile.js \
-  --export companyProfile \
-  --adapter-pack-export companyAdapterPack \
+  --export companyDeployment \
+  --require-smoke-commands \
+  --manifest-root . \
   --run-pack-contracts \
   --use-case docs \
   --contract-mode delta \
@@ -55,6 +58,8 @@ npm run company:validate -- \
   --principal-tag trusted_internal \
   --report-dir .rag/company/company-docs
 ```
+
+In CI or promotion, load the company deployment env first and add `--require-manifest-env`. Keep `evals.requiredPaths` aligned with the copied JSONL files so the manifest gate proves the pack ships the retrieval and refusal eval fixtures it declares.
 
 ## ACL Mapping
 
@@ -79,8 +84,7 @@ After the pack contract passes, run the serious storage gate from the deployment
 export RAG_DATABASE_URL=postgres://rag:rag_dev_password@127.0.0.1:54329/rag
 npm run company:smoke:postgres -- \
   --module dist/company/company-profile.js \
-  --export companyProfile \
-  --adapter-pack-export companyAdapterPack \
+  --export companyDeployment \
   --use-case docs \
   --source-id company_docs_api \
   --local-provider \

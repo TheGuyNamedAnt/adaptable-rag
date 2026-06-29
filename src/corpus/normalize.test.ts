@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { hashText } from "../chunking/hash.js";
 import type { DocumentLayout } from "../documents/layout.js";
+import { resolveTrustTierDecision } from "../documents/trust-tier.js";
 import { genericDocsProfile } from "../profiles/examples/generic-docs.profile.js";
 import type { CorpusSourceConfig, RagProfile } from "../profiles/profile.js";
 import { assertValidProfile } from "../profiles/profile-validation.js";
@@ -327,7 +328,60 @@ test("caps normalized trust at the source trust floor", () => {
   assert.equal(result.accepted, true);
   if (result.accepted) {
     assert.equal(result.document.provenance.trustTier, "user_provided");
+    assert.equal(result.document.metadata?.trustDeclaredTier, "trusted_internal");
+    assert.equal(result.document.metadata?.trustEffectiveTier, "user_provided");
+    assert.equal(result.document.metadata?.trustSourceFloor, "user_provided");
+    assert.equal(result.document.metadata?.trustUnsafeUpgrade, false);
+    assert.equal(
+      result.document.metadata?.trustDecisionReasons,
+      "record_declared_trust_tier,source_floor_downgraded_trust"
+    );
   }
+});
+
+test("records trust override downgrades in document metadata", () => {
+  const source = genericDocsProfile.corpusSources[0];
+  assert.ok(source);
+  const overrideSource: CorpusSourceConfig = {
+    ...source,
+    trustTierOverride: "user_provided"
+  };
+  const profile: RagProfile = {
+    ...genericDocsProfile,
+    corpusSources: [overrideSource]
+  };
+  const validatedProfile = assertValidProfile(profile);
+
+  const result = normalizeCorpusRecord(makeRecord({ trustTier: "trusted_internal" }), {
+    profile: validatedProfile,
+    source: overrideSource,
+    requestedBy: principal,
+    ingestedAt: FIXED_NOW
+  });
+
+  assert.equal(result.accepted, true);
+  if (result.accepted) {
+    assert.equal(result.document.provenance.trustTier, "user_provided");
+    assert.equal(result.document.metadata?.trustSourceOverride, "user_provided");
+    assert.equal(
+      result.document.metadata?.trustDecisionReasons,
+      "record_declared_trust_tier,source_override_downgraded_trust"
+    );
+  }
+});
+
+test("trust tier decision reports rejected source override upgrades", () => {
+  const decision = resolveTrustTierDecision({
+    declaredTrustTier: "user_provided",
+    sourceTrustTierOverride: "trusted_internal"
+  });
+
+  assert.equal(decision.effectiveTrustTier, "user_provided");
+  assert.equal(decision.unsafeUpgrade, true);
+  assert.deepEqual(decision.reasons, [
+    "record_declared_trust_tier",
+    "source_override_rejected_trust_upgrade"
+  ]);
 });
 
 test("verifies record body checksum before accepting provenance", () => {

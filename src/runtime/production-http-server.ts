@@ -11,13 +11,25 @@ import {
   type ProductionRagApp,
   type ProductionRagAnswerInput
 } from "./production-app.js";
+import {
+  PrincipalResolutionError,
+  verifySignedPrincipalPayload
+} from "../security/principal-resolver.js";
+
+const MAX_LATENCY_SAMPLES = 1_000;
 
 export interface ProductionRagHttpServerOptions {
   readonly app: ProductionRagApp;
   readonly http?: Partial<ProductionHttpConfig>;
+  readonly readiness?: ProductionHttpReadinessOptions;
   readonly nowMs?: () => number;
   readonly requestId?: () => string;
   readonly logger?: ProductionHttpOperationsLogger;
+}
+
+export interface ProductionHttpReadinessOptions {
+  readonly mode?: "flag" | "self_test";
+  readonly probeProviders?: boolean;
 }
 
 export interface ProductionRagHttpServer {
@@ -72,6 +84,9 @@ export interface ProductionHttpMetricsSnapshot {
   readonly byStatusCode: Readonly<Record<string, number>>;
   readonly byRoute: Readonly<Record<string, number>>;
   readonly byOutcome: Readonly<Record<string, number>>;
+  readonly byAnswerStatus: Readonly<Record<string, number>>;
+  readonly latencyMs: ProductionHttpLatencySummary;
+  readonly byRouteLatencyMs: Readonly<Record<string, ProductionHttpLatencySummary>>;
   readonly authDenied: number;
   readonly rateLimited: number;
   readonly answerSucceeded: number;
@@ -79,6 +94,39 @@ export interface ProductionHttpMetricsSnapshot {
   readonly answerFailed: number;
   readonly requestErrors: number;
   readonly serverErrors: number;
+  readonly rag: ProductionRagHttpMetricsSnapshot;
+}
+
+export interface ProductionHttpLatencySummary {
+  readonly count: number;
+  readonly min: number;
+  readonly max: number;
+  readonly avg: number;
+  readonly p50: number;
+  readonly p95: number;
+  readonly p99: number;
+}
+
+export interface ProductionRagHttpMetricsSnapshot {
+  readonly answerCount: number;
+  readonly retrievedChunkCount: number;
+  readonly rejectedRetrievalCount: number;
+  readonly citationCount: number;
+  readonly lowCitationAnswerCount: number;
+  readonly noEvidenceAnswerCount: number;
+  readonly humanReviewRequiredCount: number;
+  readonly byEvidenceStatus: Readonly<Record<string, number>>;
+  readonly byProfile: Readonly<Record<string, number>>;
+  readonly byNamespace: Readonly<Record<string, number>>;
+  readonly byTenantHash: Readonly<Record<string, number>>;
+  readonly modelPromptTokens: number;
+  readonly modelCompletionTokens: number;
+  readonly modelTotalTokens: number;
+  readonly estimatedCostUsd: number;
+  readonly retrievalLatencyMs: ProductionHttpLatencySummary;
+  readonly contextLatencyMs: ProductionHttpLatencySummary;
+  readonly generationLatencyMs: ProductionHttpLatencySummary;
+  readonly modelLatencyMs: ProductionHttpLatencySummary;
 }
 
 interface RequestOperationContext {
@@ -96,6 +144,31 @@ interface RequestCompletionDetails {
   readonly traceId?: string;
   readonly authResult?: "passed" | "missing_or_invalid" | "disabled";
   readonly errorName?: string;
+  readonly answerTelemetry?: ProductionAnswerTelemetry;
+}
+
+interface ProductionAnswerTelemetry {
+  readonly profileId?: string;
+  readonly namespaceId?: string;
+  readonly tenantHash?: string;
+  readonly retrievedChunkCount: number;
+  readonly rejectedRetrievalCount: number;
+  readonly citationCount: number;
+  readonly evidenceStatus?: string;
+  readonly modelPromptTokens: number;
+  readonly modelCompletionTokens: number;
+  readonly modelTotalTokens: number;
+  readonly estimatedCostUsd: number;
+  readonly retrievalLatencyMs?: number;
+  readonly contextLatencyMs?: number;
+  readonly generationLatencyMs?: number;
+  readonly modelLatencyMs?: number;
+}
+
+interface ReadinessResponse {
+  readonly statusCode: number;
+  readonly body: unknown;
+  readonly outcome: string;
 }
 
 export function createProductionRagHttpServer(
@@ -111,7 +184,15 @@ export function createProductionRagHttpServer(
   });
   const edge = new ProductionHttpEdgeGuard(http, nowMs);
   const server = createServer((request, response) => {
-    void handleProductionRagHttpRequest(options.app, request, response, http, edge, operations);
+    void handleProductionRagHttpRequest(
+      options.app,
+      request,
+      response,
+      http,
+      edge,
+      operations,
+      options.readiness
+    );
   });
 
   return {
@@ -169,7 +250,8 @@ export async function handleProductionRagHttpRequest(
     config: http,
     nowMs: Date.now,
     requestId: randomUUID
-  })
+  }),
+  readiness: ProductionHttpReadinessOptions = {}
 ): Promise<void> {
   let context: RequestOperationContext | undefined;
   try {
@@ -177,45 +259,28 @@ export async function handleProductionRagHttpRequest(
     context = operations.begin(request, url.pathname, routeName(url.pathname, http));
 
     if (request.method === "GET" && url.pathname === "/health") {
-      complete(response, operations, context, 200, app.health(), {}, "health");
+      complete(response, operations, context, 200, await productionAppHealth(app), {}, "health");
       return;
     }
 
     if (request.method === "GET" && url.pathname === http.operations.readinessPath) {
-      if (operations.ready()) {
-        complete(
-          response,
-          operations,
-          context,
-          200,
-          {
-            status: "ready",
-            ready: true,
-            health: app.health()
-          },
-          {},
-          "ready"
-        );
-        return;
-      }
-
-      complete(
-        response,
-        operations,
-        context,
-        503,
-        {
-          status: "draining",
-          ready: false
-        },
-        {},
-        "not_ready"
-      );
+      const result = await readinessResponse(app, operations, readiness);
+      complete(response, operations, context, result.statusCode, result.body, {}, result.outcome);
       return;
     }
 
     if (request.method === "GET" && url.pathname === http.operations.metricsPath) {
-      complete(response, operations, context, 200, operations.snapshot(), {}, "metrics");
+      const metrics = operations.snapshot();
+      if (url.searchParams.get("format") === "prometheus") {
+        writeText(response, 200, renderPrometheusMetrics(metrics), {
+          "content-type": "text/plain; version=0.0.4; charset=utf-8",
+          [context.requestIdHeader]: context.requestId
+        });
+        operations.complete(context, 200, "metrics", {});
+        return;
+      }
+
+      complete(response, operations, context, 200, metrics, {}, "metrics");
       return;
     }
 
@@ -265,13 +330,20 @@ export async function handleProductionRagHttpRequest(
         return;
       }
 
-      const body = (await readJsonBody(request, http.maxBodyBytes)) as ProductionRagAnswerInput;
+      const body = resolveHttpAnswerPrincipal(
+        (await readJsonBody(request, http.maxBodyBytes)) as ProductionRagAnswerInput,
+        request,
+        http,
+        app.profile.namespaceId,
+        () => edge.currentTimeMs()
+      );
       const result = await app.answer(body);
       complete(response, operations, context, 200, result, rateLimitHeaders(rateLimit), "answer", {
         answerStatus: result.status,
         runId: result.trace.runId,
         traceId: result.trace.traceId,
         authResult: http.auth.mode === "disabled" ? "disabled" : "passed",
+        answerTelemetry: answerTelemetry(result, body),
         ...safeFailureDetails(result)
       });
       return;
@@ -386,6 +458,60 @@ function readJsonBody(request: IncomingMessage, maxBodyBytes: number): Promise<u
   });
 }
 
+function resolveHttpAnswerPrincipal(
+  input: ProductionRagAnswerInput,
+  request: IncomingMessage,
+  http: ProductionHttpConfig,
+  defaultNamespaceId: string,
+  nowMs: () => number
+): ProductionRagAnswerInput {
+  if (http.principal?.mode !== "signed_header") {
+    return input;
+  }
+
+  const record = asRecord(input);
+  if (!record) {
+    throw new ProductionRagRequestError("Answer request must be a JSON object.");
+  }
+
+  const tenantId = stringField(record, "tenantId");
+  if (tenantId === undefined) {
+    throw new ProductionRagRequestError("tenantId must be a non-empty string.");
+  }
+  const namespaceId = stringField(record, "namespaceId") ?? defaultNamespaceId;
+  const payload = firstHeader(request, http.principal.headerName);
+  const signature = firstHeader(request, http.principal.signatureHeaderName);
+  if (payload === undefined || signature === undefined) {
+    throw new ProductionRagRequestError("Signed principal headers are required.", 401);
+  }
+
+  try {
+    const principal = verifySignedPrincipalPayload({
+      payload,
+      signature,
+      secrets: http.principal.signingSecrets,
+      context: { tenantId, namespaceId },
+      verification: {
+        ...(http.principal.maxAgeMs === undefined ? {} : { maxAgeMs: http.principal.maxAgeMs }),
+        ...(http.principal.clockSkewMs === undefined
+          ? {}
+          : { clockSkewMs: http.principal.clockSkewMs }),
+        ...(http.principal.issuer === undefined ? {} : { expectedIssuer: http.principal.issuer }),
+        nowMs
+      }
+    });
+    return {
+      ...record,
+      principal
+    } as ProductionRagAnswerInput;
+  } catch (error) {
+    if (error instanceof PrincipalResolutionError) {
+      throw new ProductionRagRequestError(error.message, error.statusCode);
+    }
+    throw error;
+  }
+}
+
 interface AuthDecision {
   readonly allowed: boolean;
   readonly rateLimitKey?: string;
@@ -437,9 +563,63 @@ class ProductionHttpEdgeGuard {
     return this.limiter.check(key);
   }
 
+  currentTimeMs(): number {
+    return this.nowMs();
+  }
+
   clientKey(request: IncomingMessage): string {
     return `ip:${clientIp(request, this.http.rateLimit.clientIpHeader)}`;
   }
+}
+
+async function readinessResponse(
+  app: ProductionRagApp,
+  operations: ProductionHttpOperationsRuntime,
+  options: ProductionHttpReadinessOptions
+): Promise<ReadinessResponse> {
+  if (!operations.ready()) {
+    return {
+      statusCode: 503,
+      body: {
+        status: "draining",
+        ready: false
+      },
+      outcome: "not_ready"
+    };
+  }
+
+  if (options.mode !== "self_test") {
+    return {
+      statusCode: 200,
+      body: {
+        status: "ready",
+        ready: true,
+        health: await productionAppHealth(app)
+      },
+      outcome: "ready"
+    };
+  }
+
+  const selfTest = await app.selfTest({
+    probeProviders: options.probeProviders === true
+  });
+  const ready = selfTest.status === "passed";
+  return {
+    statusCode: ready ? 200 : 503,
+    body: {
+      status: ready ? "ready" : "not_ready",
+      ready,
+      health: await productionAppHealth(app),
+      selfTest
+    },
+    outcome: ready ? "ready" : "not_ready"
+  };
+}
+
+async function productionAppHealth(
+  app: ProductionRagApp
+): Promise<ReturnType<ProductionRagApp["health"]>> {
+  return app.healthAsync === undefined ? app.health() : app.healthAsync();
 }
 
 class FixedWindowRateLimiter {
@@ -503,6 +683,7 @@ class ProductionHttpOperationsRuntime {
     byStatusCode: new Map<string, number>(),
     byRoute: new Map<string, number>(),
     byOutcome: new Map<string, number>(),
+    byAnswerStatus: new Map<string, number>(),
     authDenied: 0,
     rateLimited: 0,
     answerSucceeded: 0,
@@ -510,6 +691,29 @@ class ProductionHttpOperationsRuntime {
     answerFailed: 0,
     requestErrors: 0,
     serverErrors: 0
+  };
+  private readonly durationsMs: number[] = [];
+  private readonly routeDurationsMs = new Map<string, number[]>();
+  private readonly rag = {
+    answerCount: 0,
+    retrievedChunkCount: 0,
+    rejectedRetrievalCount: 0,
+    citationCount: 0,
+    lowCitationAnswerCount: 0,
+    noEvidenceAnswerCount: 0,
+    humanReviewRequiredCount: 0,
+    byEvidenceStatus: new Map<string, number>(),
+    byProfile: new Map<string, number>(),
+    byNamespace: new Map<string, number>(),
+    byTenantHash: new Map<string, number>(),
+    modelPromptTokens: 0,
+    modelCompletionTokens: 0,
+    modelTotalTokens: 0,
+    estimatedCostUsd: 0,
+    retrievalLatencyMs: [] as number[],
+    contextLatencyMs: [] as number[],
+    generationLatencyMs: [] as number[],
+    modelLatencyMs: [] as number[]
   };
   private readyState = true;
   private drainingState = false;
@@ -551,6 +755,8 @@ class ProductionHttpOperationsRuntime {
     this.counters.completedRequests += 1;
     increment(this.counters.byStatusCode, String(statusCode));
     increment(this.counters.byOutcome, outcome);
+    recordDuration(this.durationsMs, durationMs);
+    recordDurationForRoute(this.routeDurationsMs, context.route, durationMs);
     this.applySpecialCounters(statusCode, outcome, details);
     this.emit({
       event: "http_access",
@@ -601,13 +807,37 @@ class ProductionHttpOperationsRuntime {
       byStatusCode: mapToRecord(this.counters.byStatusCode),
       byRoute: mapToRecord(this.counters.byRoute),
       byOutcome: mapToRecord(this.counters.byOutcome),
+      byAnswerStatus: mapToRecord(this.counters.byAnswerStatus),
+      latencyMs: latencySummary(this.durationsMs),
+      byRouteLatencyMs: routeLatencySummary(this.routeDurationsMs),
       authDenied: this.counters.authDenied,
       rateLimited: this.counters.rateLimited,
       answerSucceeded: this.counters.answerSucceeded,
       answerRefused: this.counters.answerRefused,
       answerFailed: this.counters.answerFailed,
       requestErrors: this.counters.requestErrors,
-      serverErrors: this.counters.serverErrors
+      serverErrors: this.counters.serverErrors,
+      rag: {
+        answerCount: this.rag.answerCount,
+        retrievedChunkCount: this.rag.retrievedChunkCount,
+        rejectedRetrievalCount: this.rag.rejectedRetrievalCount,
+        citationCount: this.rag.citationCount,
+        lowCitationAnswerCount: this.rag.lowCitationAnswerCount,
+        noEvidenceAnswerCount: this.rag.noEvidenceAnswerCount,
+        humanReviewRequiredCount: this.rag.humanReviewRequiredCount,
+        byEvidenceStatus: mapToRecord(this.rag.byEvidenceStatus),
+        byProfile: mapToRecord(this.rag.byProfile),
+        byNamespace: mapToRecord(this.rag.byNamespace),
+        byTenantHash: mapToRecord(this.rag.byTenantHash),
+        modelPromptTokens: this.rag.modelPromptTokens,
+        modelCompletionTokens: this.rag.modelCompletionTokens,
+        modelTotalTokens: this.rag.modelTotalTokens,
+        estimatedCostUsd: roundMetric(this.rag.estimatedCostUsd),
+        retrievalLatencyMs: latencySummary(this.rag.retrievalLatencyMs),
+        contextLatencyMs: latencySummary(this.rag.contextLatencyMs),
+        generationLatencyMs: latencySummary(this.rag.generationLatencyMs),
+        modelLatencyMs: latencySummary(this.rag.modelLatencyMs)
+      }
     };
   }
 
@@ -636,6 +866,12 @@ class ProductionHttpOperationsRuntime {
     if (details.answerStatus === "succeeded") {
       this.counters.answerSucceeded += 1;
     }
+    if (details.answerStatus !== undefined) {
+      increment(this.counters.byAnswerStatus, details.answerStatus);
+    }
+    if (details.answerTelemetry !== undefined) {
+      this.applyAnswerTelemetry(details.answerStatus, details.answerTelemetry);
+    }
     if (details.answerStatus === "refused") {
       this.counters.answerRefused += 1;
     }
@@ -647,6 +883,53 @@ class ProductionHttpOperationsRuntime {
     }
     if (statusCode >= 500) {
       this.counters.serverErrors += 1;
+    }
+  }
+
+  private applyAnswerTelemetry(
+    status: ProductionRagAnswerResponse["status"] | undefined,
+    telemetry: ProductionAnswerTelemetry
+  ): void {
+    this.rag.answerCount += 1;
+    this.rag.retrievedChunkCount += telemetry.retrievedChunkCount;
+    this.rag.rejectedRetrievalCount += telemetry.rejectedRetrievalCount;
+    this.rag.citationCount += telemetry.citationCount;
+    this.rag.modelPromptTokens += telemetry.modelPromptTokens;
+    this.rag.modelCompletionTokens += telemetry.modelCompletionTokens;
+    this.rag.modelTotalTokens += telemetry.modelTotalTokens;
+    this.rag.estimatedCostUsd += telemetry.estimatedCostUsd;
+    if (telemetry.citationCount === 0 && status !== "retrieval_failed") {
+      this.rag.lowCitationAnswerCount += 1;
+    }
+    if (status === "human_review_required") {
+      this.rag.humanReviewRequiredCount += 1;
+    }
+    if (telemetry.evidenceStatus !== undefined) {
+      increment(this.rag.byEvidenceStatus, telemetry.evidenceStatus);
+      if (telemetry.evidenceStatus === "no_evidence") {
+        this.rag.noEvidenceAnswerCount += 1;
+      }
+    }
+    if (telemetry.profileId !== undefined) {
+      increment(this.rag.byProfile, telemetry.profileId);
+    }
+    if (telemetry.namespaceId !== undefined) {
+      increment(this.rag.byNamespace, telemetry.namespaceId);
+    }
+    if (telemetry.tenantHash !== undefined) {
+      increment(this.rag.byTenantHash, telemetry.tenantHash);
+    }
+    if (telemetry.retrievalLatencyMs !== undefined) {
+      recordDuration(this.rag.retrievalLatencyMs, telemetry.retrievalLatencyMs);
+    }
+    if (telemetry.contextLatencyMs !== undefined) {
+      recordDuration(this.rag.contextLatencyMs, telemetry.contextLatencyMs);
+    }
+    if (telemetry.generationLatencyMs !== undefined) {
+      recordDuration(this.rag.generationLatencyMs, telemetry.generationLatencyMs);
+    }
+    if (telemetry.modelLatencyMs !== undefined) {
+      recordDuration(this.rag.modelLatencyMs, telemetry.modelLatencyMs);
     }
   }
 
@@ -662,6 +945,217 @@ class ProductionHttpOperationsRuntime {
       // Logging must never change request behavior.
     }
   }
+}
+
+function recordDuration(values: number[], durationMs: number): void {
+  values.push(durationMs);
+  if (values.length > MAX_LATENCY_SAMPLES) {
+    values.splice(0, values.length - MAX_LATENCY_SAMPLES);
+  }
+}
+
+function recordDurationForRoute(
+  routes: Map<string, number[]>,
+  route: string,
+  durationMs: number
+): void {
+  const values = routes.get(route) ?? [];
+  recordDuration(values, durationMs);
+  routes.set(route, values);
+}
+
+function latencySummary(values: readonly number[]): ProductionHttpLatencySummary {
+  if (values.length === 0) {
+    return {
+      count: 0,
+      min: 0,
+      max: 0,
+      avg: 0,
+      p50: 0,
+      p95: 0,
+      p99: 0
+    };
+  }
+
+  const sorted = [...values].sort((a, b) => a - b);
+  const sum = sorted.reduce((total, value) => total + value, 0);
+  return {
+    count: sorted.length,
+    min: sorted[0] ?? 0,
+    max: sorted[sorted.length - 1] ?? 0,
+    avg: roundMetric(sum / sorted.length),
+    p50: percentile(sorted, 0.5),
+    p95: percentile(sorted, 0.95),
+    p99: percentile(sorted, 0.99)
+  };
+}
+
+function routeLatencySummary(
+  routes: ReadonlyMap<string, readonly number[]>
+): Readonly<Record<string, ProductionHttpLatencySummary>> {
+  const result: Record<string, ProductionHttpLatencySummary> = {};
+  for (const [route, values] of routes) {
+    result[route] = latencySummary(values);
+  }
+  return result;
+}
+
+function percentile(sortedValues: readonly number[], percentileValue: number): number {
+  if (sortedValues.length === 0) {
+    return 0;
+  }
+  const index = Math.min(
+    sortedValues.length - 1,
+    Math.max(0, Math.ceil(sortedValues.length * percentileValue) - 1)
+  );
+  return roundMetric(sortedValues[index] ?? 0);
+}
+
+function roundMetric(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
+function answerTelemetry(
+  result: ProductionRagAnswerResponse,
+  input: ProductionRagAnswerInput
+): ProductionAnswerTelemetry {
+  const retrievalTrace = asRecord(result.retrieval?.trace);
+  const contextTrace = asRecord(result.context?.trace);
+  const generationTrace = asRecord(result.generation?.trace);
+  const modelTrace = asRecord(generationTrace?.["model"]);
+  const evidence = asRecord(result.context?.evidence);
+  const evidenceStatus = stringField(evidence, "status");
+  const tenantId = typeof input.tenantId === "string" ? input.tenantId : undefined;
+  return {
+    profileId: result.trace.profileId,
+    namespaceId: result.trace.namespaceId,
+    ...(tenantId === undefined ? {} : { tenantHash: sha256Hex(tenantId) }),
+    retrievedChunkCount: numberField(retrievalTrace, "returnedCount") ?? 0,
+    rejectedRetrievalCount: numberField(retrievalTrace, "rejectedCount") ?? 0,
+    citationCount: result.citations?.length ?? result.citationChunkIds?.length ?? 0,
+    ...(evidenceStatus === undefined ? {} : { evidenceStatus }),
+    modelPromptTokens: numberField(modelTrace, "promptTokens") ?? 0,
+    modelCompletionTokens: numberField(modelTrace, "completionTokens") ?? 0,
+    modelTotalTokens: numberField(modelTrace, "totalTokens") ?? 0,
+    estimatedCostUsd: numberField(modelTrace, "estimatedCostUsd") ?? 0,
+    ...optionalMetric("retrievalLatencyMs", durationBetweenTraceDates(retrievalTrace)),
+    ...optionalMetric("contextLatencyMs", durationBetweenTraceDates(contextTrace)),
+    ...optionalMetric("generationLatencyMs", durationBetweenTraceDates(generationTrace)),
+    ...optionalMetric("modelLatencyMs", numberField(modelTrace, "latencyMs"))
+  };
+}
+
+function optionalMetric<TKey extends string>(
+  key: TKey,
+  value: number | undefined
+): { readonly [K in TKey]?: number } {
+  return (value === undefined ? {} : { [key]: value }) as { readonly [K in TKey]?: number };
+}
+
+function durationBetweenTraceDates(
+  trace: Readonly<Record<string, unknown>> | undefined
+): number | undefined {
+  const startedAt = stringField(trace, "startedAt");
+  const finishedAt = stringField(trace, "finishedAt");
+  if (startedAt === undefined || finishedAt === undefined) {
+    return undefined;
+  }
+
+  const started = Date.parse(startedAt);
+  const finished = Date.parse(finishedAt);
+  if (!Number.isFinite(started) || !Number.isFinite(finished)) {
+    return undefined;
+  }
+
+  return Math.max(0, finished - started);
+}
+
+function asRecord(value: unknown): Readonly<Record<string, unknown>> | undefined {
+  return typeof value === "object" && value !== null
+    ? (value as Readonly<Record<string, unknown>>)
+    : undefined;
+}
+
+function numberField(
+  record: Readonly<Record<string, unknown>> | undefined,
+  key: string
+): number | undefined {
+  const value = record?.[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function stringField(
+  record: Readonly<Record<string, unknown>> | undefined,
+  key: string
+): string | undefined {
+  const value = record?.[key];
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function renderPrometheusMetrics(metrics: ProductionHttpMetricsSnapshot): string {
+  const lines: string[] = [
+    prometheusMetric("rag_http_requests_total", metrics.totalRequests),
+    prometheusMetric("rag_http_active_requests", metrics.activeRequests),
+    prometheusMetric("rag_http_auth_denied_total", metrics.authDenied),
+    prometheusMetric("rag_http_rate_limited_total", metrics.rateLimited),
+    prometheusMetric("rag_http_server_errors_total", metrics.serverErrors),
+    prometheusMetric("rag_http_request_errors_total", metrics.requestErrors),
+    prometheusMetric("rag_http_latency_ms_p50", metrics.latencyMs.p50),
+    prometheusMetric("rag_http_latency_ms_p95", metrics.latencyMs.p95),
+    prometheusMetric("rag_http_latency_ms_p99", metrics.latencyMs.p99),
+    prometheusMetric("rag_answers_total", metrics.rag.answerCount),
+    prometheusMetric("rag_retrieved_chunks_total", metrics.rag.retrievedChunkCount),
+    prometheusMetric("rag_rejected_retrievals_total", metrics.rag.rejectedRetrievalCount),
+    prometheusMetric("rag_citations_total", metrics.rag.citationCount),
+    prometheusMetric("rag_low_citation_answers_total", metrics.rag.lowCitationAnswerCount),
+    prometheusMetric("rag_no_evidence_answers_total", metrics.rag.noEvidenceAnswerCount),
+    prometheusMetric("rag_human_review_required_total", metrics.rag.humanReviewRequiredCount),
+    prometheusMetric("rag_model_prompt_tokens_total", metrics.rag.modelPromptTokens),
+    prometheusMetric("rag_model_completion_tokens_total", metrics.rag.modelCompletionTokens),
+    prometheusMetric("rag_model_total_tokens_total", metrics.rag.modelTotalTokens),
+    prometheusMetric("rag_estimated_cost_usd_total", metrics.rag.estimatedCostUsd),
+    prometheusMetric("rag_model_latency_ms_p95", metrics.rag.modelLatencyMs.p95)
+  ];
+
+  for (const [route, count] of Object.entries(metrics.byRoute)) {
+    lines.push(prometheusMetric("rag_http_route_requests_total", count, { route }));
+  }
+  for (const [status, count] of Object.entries(metrics.byAnswerStatus)) {
+    lines.push(prometheusMetric("rag_answer_status_total", count, { status }));
+  }
+  for (const [status, count] of Object.entries(metrics.rag.byEvidenceStatus)) {
+    lines.push(prometheusMetric("rag_context_evidence_status_total", count, { status }));
+  }
+  for (const [profile, count] of Object.entries(metrics.rag.byProfile)) {
+    lines.push(prometheusMetric("rag_answers_by_profile_total", count, { profile }));
+  }
+  for (const [namespace, count] of Object.entries(metrics.rag.byNamespace)) {
+    lines.push(prometheusMetric("rag_answers_by_namespace_total", count, { namespace }));
+  }
+  for (const [tenantHash, count] of Object.entries(metrics.rag.byTenantHash)) {
+    lines.push(prometheusMetric("rag_answers_by_tenant_hash_total", count, { tenantHash }));
+  }
+
+  return `${lines.join("\n")}\n`;
+}
+
+function prometheusMetric(
+  name: string,
+  value: number,
+  labels: Readonly<Record<string, string>> = {}
+): string {
+  const labelEntries = Object.entries(labels);
+  const renderedLabels =
+    labelEntries.length === 0
+      ? ""
+      : `{${labelEntries
+          .map(([key, labelValue]) => `${key}="${escapePrometheusLabel(labelValue)}"`)
+          .join(",")}}`;
+  return `${name}${renderedLabels} ${Number.isFinite(value) ? value : 0}`;
+}
+
+function escapePrometheusLabel(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n");
 }
 
 function complete(
@@ -685,11 +1179,13 @@ function mergeHttpConfig(
   base: ProductionHttpConfig,
   override: Partial<ProductionHttpConfig> | undefined
 ): ProductionHttpConfig {
+  const principal = override?.principal ?? base.principal;
   return {
     host: override?.host ?? base.host,
     port: override?.port ?? base.port,
     maxBodyBytes: override?.maxBodyBytes ?? base.maxBodyBytes,
     auth: override?.auth ?? base.auth,
+    ...(principal === undefined ? {} : { principal }),
     rateLimit: override?.rateLimit ?? base.rateLimit,
     operations: override?.operations ?? base.operations
   };
@@ -840,6 +1336,19 @@ function writeJson(
     "content-length": Buffer.byteLength(serialized)
   });
   response.end(serialized);
+}
+
+function writeText(
+  response: ServerResponse,
+  statusCode: number,
+  body: string,
+  headers: Record<string, string> = {}
+): void {
+  response.writeHead(statusCode, {
+    ...headers,
+    "content-length": Buffer.byteLength(body)
+  });
+  response.end(body);
 }
 
 function errorName(error: unknown): string {

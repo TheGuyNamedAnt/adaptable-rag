@@ -3,9 +3,11 @@ import test from "node:test";
 
 import { DEFAULT_CHUNKING_POLICY, type ChunkingPolicy } from "../chunking/chunk-policy.js";
 import { chunkDocument } from "../chunking/chunker.js";
+import type { RagChunk } from "../documents/chunk.js";
 import type { RagDocument } from "../documents/document.js";
 import type { SourceKind } from "../documents/provenance.js";
 import { InMemoryRagIndex } from "../indexing/in-memory-index.js";
+import { hashText } from "../shared/hash.js";
 import {
   FIXED_NOW,
   makeDocument,
@@ -125,6 +127,67 @@ test("boosts structured evidence chunks next to matching source context", async 
 
   assert.ok(tableCandidate);
   assert.equal(tableCandidate.reasons.includes("structured_neighbor_match"), true);
+});
+
+test("searches enriched parser-derived text for structured chunks", async () => {
+  const document: RagDocument = {
+    ...makeDocument({
+      id: "doc_formula_metric",
+      title: "Formula Appendix",
+      body: "x = y + z"
+    }),
+    layout: {
+      parserId: "fixture-parser",
+      strategy: "hybrid",
+      pages: [{ pageNumber: 4, width: 600, height: 800, unit: "point" }],
+      regions: [
+        {
+          id: "equation_retention",
+          kind: "equation",
+          pageNumber: 4,
+          text: "x = y + z",
+          characterStart: 0,
+          characterEnd: "x = y + z".length,
+          box: {
+            pageNumber: 4,
+            x: 80,
+            y: 220,
+            width: 180,
+            height: 36,
+            unit: "point"
+          }
+        }
+      ]
+    }
+  };
+  const formulaChunk = fixtureChunk({
+    document,
+    id: "chunk_equation_retention",
+    text: document.body,
+    metadata: {
+      searchableUnitType: "equation_chunk",
+      searchableEmbeddingText: [
+        "Equation",
+        "Metric: retention formula",
+        "Text: x = y + z",
+        "Page: 4"
+      ].join("\n")
+    }
+  });
+  const index = new InMemoryRagIndex({ now: () => FIXED_NOW });
+  index.addDocument(document);
+  index.addChunks(document.id, [formulaChunk]);
+  const retriever = new KeywordRetriever({ chunkStore: index, now: () => FIXED_NOW });
+
+  const result = await retriever.retrieve({
+    query: "retention formula",
+    filter: makeIndexFilter(),
+    topK: 3
+  });
+
+  assert.equal(result.candidates.length, 1);
+  assert.equal(result.candidates[0]?.chunk.id, "chunk_equation_retention");
+  assert.deepEqual(result.candidates[0]?.matchedTerms, ["retention", "formula"]);
 });
 
 test("retrieves keyword matches with citations and trace", async () => {
@@ -394,6 +457,62 @@ test("uses deterministic ordering when scores tie", async () => {
   );
 });
 
+test("boosts newer keyword matches for freshness intent", async () => {
+  const older = makeDocument({
+    id: "doc_a_older",
+    body: "Refund policy."
+  });
+  const newer = makeDocument({
+    id: "doc_z_newer",
+    body: "Refund policy."
+  });
+  const index = makeIndexWithDocuments([
+    {
+      ...older,
+      provenance: {
+        ...older.provenance,
+        capturedAt: "2026-01-01T00:00:00.000Z"
+      }
+    },
+    {
+      ...newer,
+      provenance: {
+        ...newer.provenance,
+        capturedAt: "2026-06-20T00:00:00.000Z"
+      }
+    }
+  ]);
+  const retriever = new KeywordRetriever({ chunkStore: index, now: () => FIXED_NOW });
+
+  const normal = await retriever.retrieve({
+    query: "refund policy",
+    filter: makeIndexFilter(),
+    topK: 2
+  });
+  const fresh = await retriever.retrieve({
+    query: "latest refund policy",
+    filter: makeIndexFilter(),
+    topK: 2,
+    intent: {
+      primary: "freshness",
+      sourceHints: ["recent"]
+    }
+  });
+
+  assert.deepEqual(
+    normal.candidates.map((candidate) => candidate.chunk.documentId),
+    ["doc_a_older", "doc_z_newer"]
+  );
+  assert.deepEqual(
+    fresh.candidates.map((candidate) => candidate.chunk.documentId),
+    ["doc_z_newer", "doc_a_older"]
+  );
+  assert.equal(fresh.candidates[0]?.reasons.includes("freshness_recency_boost"), true);
+  assert.equal(fresh.trace.freshness?.applied, true);
+  assert.equal(fresh.trace.freshness?.boostedCandidateCount, 1);
+  assert.match(fresh.trace.freshness?.reason ?? "", /bounded recency ranking boost/);
+});
+
 test("records rejected candidates when requested", async () => {
   const match = makeDocument({
     id: "doc_match",
@@ -655,3 +774,34 @@ test("rejects invalid retrieval requests", async () => {
     /cannot serve retrieval mode/
   );
 });
+
+function fixtureChunk(input: {
+  readonly document: RagDocument;
+  readonly id: string;
+  readonly text: string;
+  readonly metadata: Readonly<Record<string, string | number | boolean>>;
+}): RagChunk {
+  return {
+    id: input.id,
+    documentId: input.document.id,
+    namespaceId: input.document.namespaceId,
+    text: input.text,
+    index: 0,
+    textHash: hashText(input.text),
+    characterStart: 0,
+    characterEnd: input.text.length,
+    safetyFlags: [],
+    provenance: input.document.provenance,
+    citation: {
+      sourceId: input.document.provenance.sourceId,
+      chunkId: input.id,
+      title: input.document.title,
+      locator: `chars:0-${input.text.length}`,
+      pageNumber: 4,
+      layoutRegionIds: ["equation_retention"]
+    },
+    layoutRegionIds: ["equation_retention"],
+    accessScope: input.document.accessScope,
+    metadata: input.metadata
+  };
+}

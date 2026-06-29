@@ -1,0 +1,10 @@
+[
+  {
+    "id": "tiny-chart-q4",
+    "imgname": "tiny-chart.png",
+    "chart_text": "Q4 revenue: 125",
+    "expected_citation_page": 1,
+    "query": "What is Q4 revenue?",
+    "label": "125"
+  }
+]

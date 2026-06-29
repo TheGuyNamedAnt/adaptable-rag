@@ -2,6 +2,10 @@ import type { RagChunk } from "../documents/chunk.js";
 import { isValidIndexFilter } from "./index-filter.js";
 import type { ChunkStore } from "./chunk-store.js";
 import type { IndexFilter, IndexOperationResult, IndexOverwriteMode } from "./index-types.js";
+import {
+  LOCAL_VECTOR_SCALE_CAPABILITIES,
+  type StorageScaleCapabilities
+} from "./scale-capabilities.js";
 import { cosineSimilarity, isFiniteVector } from "../shared/vector-math.js";
 
 export interface ChunkVector {
@@ -12,6 +16,8 @@ export interface ChunkVector {
   readonly namespaceId: string;
   readonly textHash: string;
   readonly embeddingModel: string;
+  readonly embeddingProvider?: string;
+  readonly embeddingConfigHash?: string;
   readonly dimensions: number;
   readonly vector: readonly number[];
   readonly embeddedAt: string;
@@ -45,12 +51,14 @@ export interface VectorStoreCapabilities {
   readonly enforcesAccessFilters: boolean;
   readonly supportsCosineSimilarity: boolean;
   readonly dimensions?: number;
+  readonly scale?: StorageScaleCapabilities;
 }
 
 export type VectorSearchRejectionCode =
   | "invalid_filter"
   | "access_denied_or_missing_chunk"
   | "stale_vector"
+  | "embedding_identity_mismatch"
   | "vector_dimension_mismatch"
   | "no_vector_match";
 
@@ -72,6 +80,9 @@ export interface VectorSearchRequest {
   readonly vector: readonly number[];
   readonly filter: IndexFilter;
   readonly topK: number;
+  readonly embeddingModel?: string;
+  readonly embeddingProvider?: string;
+  readonly embeddingConfigHash?: string;
   readonly candidatePoolLimit?: number;
   readonly includeRejected?: boolean;
   readonly minScore?: number;
@@ -121,6 +132,7 @@ export class InMemoryVectorStore implements VectorStore {
       durable: false,
       enforcesAccessFilters: true,
       supportsCosineSimilarity: true,
+      scale: LOCAL_VECTOR_SCALE_CAPABILITIES,
       ...(options.dimensions !== undefined ? { dimensions: options.dimensions } : {})
     };
 
@@ -240,6 +252,18 @@ export class InMemoryVectorStore implements VectorStore {
             chunkId: indexed.vector.chunkId,
             code: "vector_dimension_mismatch",
             reason: "Chunk vector dimensions do not match the query vector."
+          });
+        }
+        continue;
+      }
+
+      const identityMismatch = embeddingIdentityMismatch(indexed.vector, request);
+      if (identityMismatch) {
+        if (request.includeRejected) {
+          rejected.push({
+            chunkId: indexed.vector.chunkId,
+            code: "embedding_identity_mismatch",
+            reason: identityMismatch
           });
         }
         continue;
@@ -430,6 +454,10 @@ export function validateVectorSearchRequest(
     throw new Error("Vector search topK must be an integer between 1 and 100.");
   }
 
+  validateOptionalIdentityField(request.embeddingModel, "embeddingModel");
+  validateOptionalIdentityField(request.embeddingProvider, "embeddingProvider");
+  validateOptionalIdentityField(request.embeddingConfigHash, "embeddingConfigHash");
+
   if (
     request.candidatePoolLimit !== undefined &&
     (!Number.isInteger(request.candidatePoolLimit) ||
@@ -437,6 +465,37 @@ export function validateVectorSearchRequest(
       request.candidatePoolLimit > 5000)
   ) {
     throw new Error("Vector search candidatePoolLimit must be an integer between topK and 5000.");
+  }
+}
+
+function embeddingIdentityMismatch(
+  vector: ChunkVector,
+  request: VectorSearchRequest
+): string | undefined {
+  if (request.embeddingModel !== undefined && vector.embeddingModel !== request.embeddingModel) {
+    return "Chunk vector embedding model does not match the query embedding model.";
+  }
+
+  if (
+    request.embeddingProvider !== undefined &&
+    vector.embeddingProvider !== request.embeddingProvider
+  ) {
+    return "Chunk vector embedding provider does not match the query embedding provider.";
+  }
+
+  if (
+    request.embeddingConfigHash !== undefined &&
+    vector.embeddingConfigHash !== request.embeddingConfigHash
+  ) {
+    return "Chunk vector embedding config hash does not match the query embedding config hash.";
+  }
+
+  return undefined;
+}
+
+function validateOptionalIdentityField(value: string | undefined, fieldName: string): void {
+  if (value !== undefined && !value.trim()) {
+    throw new Error(`Vector search ${fieldName} cannot be blank.`);
   }
 }
 

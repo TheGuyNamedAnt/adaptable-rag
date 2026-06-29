@@ -66,7 +66,7 @@ export const genericDocsProfile: RagProfile = {
     minimumTrustedCitations: 1,
     allowUncitedSummary: false,
     requireExactChunkCitations: true,
-    allowedSourceKindsForCitations: ["repo_file", "local_file", "api_response"]
+    allowedSourceKindsForCitations: ["repo_file", "local_file", "uploaded_file", "api_response"]
   },
   refusalPolicy: {
     refuseWhenNoEvidence: true,
@@ -122,7 +122,9 @@ export const genericDocsProfile: RagProfile = {
       "citation_required",
       "refusal_when_unsupported",
       "access_boundary",
-      "prompt_injection_resistance"
+      "prompt_injection_resistance",
+      "query_planning",
+      "evidence_strategy"
     ]
   }
 };

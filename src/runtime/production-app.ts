@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 
 import type { CitationPointer } from "../documents/provenance.js";
+import { embeddingConfigHashFor } from "../embeddings/embedding-identity.js";
 import {
   HostedVectorStore,
   type HostedVectorStoreTransport
@@ -34,6 +35,9 @@ import {
   type VectorStore,
   type VectorStoreCapabilities
 } from "../indexing/vector-store.js";
+import { isVectorGenerationInventoryProvider } from "../indexing/scale-capabilities.js";
+import { vectorGenerationInventory } from "../indexing/vector-generation-lifecycle.js";
+import type { VectorGenerationInventoryEntry } from "../indexing/vector-generation-lifecycle.js";
 import {
   InMemoryVisualVectorStore,
   type VisualVectorStore,
@@ -51,6 +55,10 @@ import type { RagProfile } from "../profiles/profile.js";
 import { assertValidProfile, type ValidatedRagProfile } from "../profiles/profile-validation.js";
 import type { ProviderTransport } from "../shared/provider-boundary.js";
 import type { ProviderEnv } from "../shared/provider-runtime-config.js";
+import {
+  normalizeRequestPrincipal,
+  PrincipalResolutionError
+} from "../security/principal-resolver.js";
 import {
   assembleLiveRagRuntimeFromEnv,
   type LiveAssembledRagRuntime,
@@ -182,6 +190,7 @@ export interface ProductionHttpConfig {
   readonly port: number;
   readonly maxBodyBytes: number;
   readonly auth: ProductionHttpAuthConfig;
+  readonly principal?: ProductionHttpPrincipalConfig;
   readonly rateLimit: ProductionHttpRateLimitConfig;
   readonly operations: ProductionHttpOperationsConfig;
 }
@@ -192,6 +201,18 @@ export interface ProductionHttpAuthConfig {
   readonly mode: ProductionHttpAuthMode;
   readonly headerName: string;
   readonly tokenSha256s: readonly string[];
+}
+
+export type ProductionHttpPrincipalMode = "request_body" | "signed_header";
+
+export interface ProductionHttpPrincipalConfig {
+  readonly mode: ProductionHttpPrincipalMode;
+  readonly headerName: string;
+  readonly signatureHeaderName: string;
+  readonly signingSecrets: readonly string[];
+  readonly maxAgeMs?: number;
+  readonly clockSkewMs?: number;
+  readonly issuer?: string;
 }
 
 export type ProductionHttpRateLimitMode = "enabled" | "disabled";
@@ -218,7 +239,14 @@ export interface ProductionRagAppConfig {
   readonly storage: ProductionStorageConfig;
   readonly providers: ProductionProviderRuntimeConfig;
   readonly http: ProductionHttpConfig;
+  readonly assurance?: ProductionAssuranceConfig;
 }
+
+export interface ProductionAssuranceConfig {
+  readonly groundingJudgeRequirement?: ProductionGroundingJudgeRequirement;
+}
+
+export type ProductionGroundingJudgeRequirement = "optional" | "required" | "profile_required";
 
 export interface LoadProductionRagAppConfigFromEnvOptions {
   readonly env?: ProviderEnv;
@@ -300,11 +328,17 @@ export interface ProductionRagHealth {
     readonly storageKind: VectorStoreCapabilities["storageKind"];
     readonly durable: boolean;
     readonly dimensions?: number;
+    readonly embeddingCompatibility?: ProductionEmbeddingCompatibility;
+    readonly generationCount?: number;
+    readonly oldGenerationCount?: number;
   };
   readonly visualVector?: {
     readonly storageKind: VisualVectorStoreCapabilities["storageKind"];
     readonly durable: boolean;
     readonly dimensions?: number;
+    readonly embeddingCompatibility?: ProductionEmbeddingCompatibility;
+    readonly generationCount?: number;
+    readonly oldGenerationCount?: number;
   };
   readonly sourceSyncLedger?: {
     readonly storageKind: Exclude<ProductionSourceSyncLedgerStorageConfig["kind"], "none">;
@@ -317,6 +351,15 @@ export interface ProductionRagHealth {
     readonly rerank?: ProductionProviderSummary;
     readonly groundingJudge?: ProductionProviderSummary;
   };
+}
+
+export interface ProductionEmbeddingCompatibility {
+  readonly status: "compatible" | "mismatch" | "unknown";
+  readonly provider: string;
+  readonly modelName: string;
+  readonly dimensions: number;
+  readonly configHash: string;
+  readonly reason: string;
 }
 
 export interface ProductionProviderSummary {
@@ -336,6 +379,7 @@ export interface ProductionRagApp {
   readonly runtime: LiveAssembledRagRuntime;
   answer(input: ProductionRagAnswerInput): Promise<ProductionRagAnswerResponse>;
   health(): ProductionRagHealth;
+  healthAsync?(): Promise<ProductionRagHealth>;
   selfTest(options?: StartupSelfTestOptions): Promise<StartupSelfTestResult>;
 }
 
@@ -364,6 +408,12 @@ const DEFAULT_HTTP_CONFIG: ProductionHttpConfig = {
     mode: "required",
     headerName: "authorization",
     tokenSha256s: []
+  },
+  principal: {
+    mode: "request_body",
+    headerName: "x-rag-principal",
+    signatureHeaderName: "x-rag-principal-signature",
+    signingSecrets: []
   },
   rateLimit: {
     mode: "enabled",
@@ -400,12 +450,14 @@ export function loadProductionRagAppConfigFromEnv(
   const providers = loadProviderConfigFromEnv(env, options.defaults?.providers);
   const http = loadHttpConfigFromEnv(env, options.defaults?.http);
   const storage = loadStorageConfigFromEnv(env, cwd, options.defaults?.storage);
+  const assurance = loadAssuranceConfigFromEnv(env, options.defaults?.assurance);
 
   return {
     profile,
     storage,
     providers,
-    http
+    http,
+    ...(assurance === undefined ? {} : { assurance })
   };
 }
 
@@ -444,6 +496,7 @@ export function createProductionRagApp(options: ProductionRagAppOptions): Produc
     ...(options.sleep === undefined ? {} : { sleep: options.sleep })
   });
   const visualEmbeddingAdapter = runtime.visualEmbeddingAdapter;
+  assertProductionAssurance(options.config.assurance, profile, runtime);
 
   return {
     config: options.config,
@@ -461,6 +514,16 @@ export function createProductionRagApp(options: ProductionRagAppOptions): Produc
     },
     health: () =>
       productionHealth(
+        profile,
+        chunkStore,
+        vectorStore,
+        visualVectorStore,
+        sourceSyncLedgerStore,
+        options.config.storage.sourceSyncLedger,
+        runtime
+      ),
+    healthAsync: () =>
+      productionHealthAsync(
         profile,
         chunkStore,
         vectorStore,
@@ -520,6 +583,27 @@ export function serializeProductionAnswerResult(
   };
 }
 
+function assertProductionAssurance(
+  assurance: ProductionAssuranceConfig | undefined,
+  profile: ValidatedRagProfile,
+  runtime: LiveAssembledRagRuntime
+): void {
+  const requirement = assurance?.groundingJudgeRequirement ?? "profile_required";
+  const required =
+    requirement === "required" ||
+    (requirement === "profile_required" && profileRequiresGroundingJudge(profile));
+
+  if (required && runtime.groundingJudge === undefined) {
+    throw new ProductionRagConfigError(
+      `Profile "${profile.id}" requires a grounding judge for production assurance. Configure the RAG_GROUNDING_JUDGE provider settings, or set RAG_GROUNDING_JUDGE_REQUIREMENT=optional for a non-production test run.`
+    );
+  }
+}
+
+function profileRequiresGroundingJudge(profile: ValidatedRagProfile): boolean {
+  return profile.evals.requiredChecks.includes("grounding_faithfulness");
+}
+
 function normalizeProductionAnswerInput(
   profile: ValidatedRagProfile,
   input: ProductionRagAnswerInput
@@ -560,28 +644,14 @@ function normalizePrincipal(
   namespaceId: string,
   tenantId: string
 ): IndexFilter["principal"] {
-  if (!isRecord(value)) {
-    throw new ProductionRagRequestError("principal must be a JSON object.");
+  try {
+    return normalizeRequestPrincipal(value, { namespaceId, tenantId });
+  } catch (error) {
+    if (error instanceof PrincipalResolutionError) {
+      throw new ProductionRagRequestError(error.message, error.statusCode);
+    }
+    throw error;
   }
-
-  const principal = {
-    userId: requiredString(value["userId"], "principal.userId"),
-    tenantId: requiredString(value["tenantId"], "principal.tenantId"),
-    namespaceIds: requiredStringArray(value["namespaceIds"], "principal.namespaceIds"),
-    teamIds: optionalStringArray(value["teamIds"], "principal.teamIds") ?? [],
-    roles: optionalStringArray(value["roles"], "principal.roles") ?? [],
-    tags: optionalStringArray(value["tags"], "principal.tags") ?? []
-  };
-
-  if (principal.tenantId !== tenantId) {
-    throw new ProductionRagRequestError("principal.tenantId must match tenantId.");
-  }
-
-  if (!principal.namespaceIds.includes(namespaceId)) {
-    throw new ProductionRagRequestError("principal.namespaceIds must include namespaceId.");
-  }
-
-  return principal;
 }
 
 function normalizeFilters(
@@ -843,23 +913,110 @@ function productionHealth(
   runtime: LiveAssembledRagRuntime
 ): ProductionRagHealth {
   const maybeStats = chunkStore.stats();
-  const stats = isPromiseLike(maybeStats)
-    ? {
-        documentCount: -1,
-        chunkCount: -1,
-        namespaceIds: [],
-        sourceIds: [],
-        trustTierCounts: {},
-        flaggedChunkCount: -1
-      }
-    : maybeStats;
+  const stats = isPromiseLike(maybeStats) ? unknownIndexStats() : maybeStats;
+  return productionHealthWithStats(
+    profile,
+    chunkStore,
+    vectorStore,
+    visualVectorStore,
+    sourceSyncLedgerStore,
+    sourceSyncLedgerConfig,
+    runtime,
+    stats,
+    vectorStore === undefined
+      ? undefined
+      : generationHealth(vectorStore, currentEmbeddingConfigHash(runtime)),
+    visualVectorStore === undefined
+      ? undefined
+      : generationHealth(visualVectorStore, currentVisualEmbeddingConfigHash(runtime))
+  );
+}
+
+async function productionHealthAsync(
+  profile: ValidatedRagProfile,
+  chunkStore: ProductionIndexStore,
+  vectorStore: VectorStore | undefined,
+  visualVectorStore: VisualVectorStore | undefined,
+  sourceSyncLedgerStore: SourceSyncLedgerStore | undefined,
+  sourceSyncLedgerConfig: ProductionSourceSyncLedgerStorageConfig | undefined,
+  runtime: LiveAssembledRagRuntime
+): Promise<ProductionRagHealth> {
+  const [stats, vectorGeneration, visualVectorGeneration] = await Promise.all([
+    chunkStore.stats(),
+    vectorStore === undefined
+      ? Promise.resolve(undefined)
+      : generationHealthAsync(vectorStore, currentEmbeddingConfigHash(runtime)),
+    visualVectorStore === undefined
+      ? Promise.resolve(undefined)
+      : generationHealthAsync(visualVectorStore, currentVisualEmbeddingConfigHash(runtime))
+  ]);
+
+  return productionHealthWithStats(
+    profile,
+    chunkStore,
+    vectorStore,
+    visualVectorStore,
+    sourceSyncLedgerStore,
+    sourceSyncLedgerConfig,
+    runtime,
+    stats,
+    vectorGeneration,
+    visualVectorGeneration
+  );
+}
+
+type ProductionGenerationHealth = {
+  readonly generationCount?: number;
+  readonly oldGenerationCount?: number;
+};
+
+function productionHealthWithStats(
+  profile: ValidatedRagProfile,
+  chunkStore: ProductionIndexStore,
+  vectorStore: VectorStore | undefined,
+  visualVectorStore: VisualVectorStore | undefined,
+  sourceSyncLedgerStore: SourceSyncLedgerStore | undefined,
+  sourceSyncLedgerConfig: ProductionSourceSyncLedgerStorageConfig | undefined,
+  runtime: LiveAssembledRagRuntime,
+  stats: IndexStats,
+  vectorGenerationHealth: ProductionGenerationHealth | undefined,
+  visualVectorGenerationHealth: ProductionGenerationHealth | undefined
+): ProductionRagHealth {
+  const embeddingCompatibilitySummary =
+    runtime.providerAdapters.embeddingAdapter === undefined
+      ? undefined
+      : embeddingCompatibility(
+          {
+            provider: runtime.providerAdapters.embeddingAdapter.provider,
+            modelName: runtime.providerAdapters.embeddingAdapter.modelName,
+            dimensions: runtime.providerAdapters.embeddingAdapter.dimensions,
+            adapterId: runtime.providerAdapters.embeddingAdapter.id
+          },
+          vectorStore?.capabilities.dimensions
+        );
+  const visualEmbeddingCompatibilitySummary =
+    runtime.providerAdapters.visualEmbeddingAdapter === undefined
+      ? undefined
+      : embeddingCompatibility(
+          {
+            provider: runtime.providerAdapters.visualEmbeddingAdapter.provider,
+            modelName: runtime.providerAdapters.visualEmbeddingAdapter.modelName,
+            dimensions: runtime.providerAdapters.visualEmbeddingAdapter.dimensions,
+            adapterId: runtime.providerAdapters.visualEmbeddingAdapter.id
+          },
+          visualVectorStore?.capabilities.dimensions
+        );
   const vector = vectorStore
     ? {
         storageKind: vectorStore.capabilities.storageKind,
         durable: vectorStore.capabilities.durable,
         ...(vectorStore.capabilities.dimensions === undefined
           ? {}
-          : { dimensions: vectorStore.capabilities.dimensions })
+          : { dimensions: vectorStore.capabilities.dimensions }),
+        ...(embeddingCompatibilitySummary === undefined
+          ? {}
+          : { embeddingCompatibility: embeddingCompatibilitySummary }),
+        ...(vectorGenerationHealth ?? {})
       }
     : undefined;
   const visualVector = visualVectorStore
@@ -868,7 +1025,11 @@ function productionHealth(
         durable: visualVectorStore.capabilities.durable,
         ...(visualVectorStore.capabilities.dimensions === undefined
           ? {}
-          : { dimensions: visualVectorStore.capabilities.dimensions })
+          : { dimensions: visualVectorStore.capabilities.dimensions }),
+        ...(visualEmbeddingCompatibilitySummary === undefined
+          ? {}
+          : { embeddingCompatibility: visualEmbeddingCompatibilitySummary }),
+        ...(visualVectorGenerationHealth ?? {})
       }
     : undefined;
   const sourceSyncLedger =
@@ -894,6 +1055,130 @@ function productionHealth(
     ...(visualVector === undefined ? {} : { visualVector }),
     ...(sourceSyncLedger === undefined ? {} : { sourceSyncLedger }),
     providers: providerHealth(runtime)
+  };
+}
+
+function unknownIndexStats(): IndexStats {
+  return {
+    documentCount: -1,
+    chunkCount: -1,
+    namespaceIds: [],
+    sourceIds: [],
+    trustTierCounts: {},
+    flaggedChunkCount: -1
+  };
+}
+
+function embeddingCompatibility(
+  provider: {
+    readonly provider: string;
+    readonly modelName: string;
+    readonly dimensions: number;
+    readonly adapterId?: string;
+  },
+  storeDimensions: number | undefined
+): ProductionEmbeddingCompatibility {
+  const configHash = embeddingConfigHashFor(provider);
+
+  if (storeDimensions === undefined) {
+    return {
+      status: "unknown",
+      provider: provider.provider,
+      modelName: provider.modelName,
+      dimensions: provider.dimensions,
+      configHash,
+      reason: "Vector store does not declare configured dimensions."
+    };
+  }
+
+  if (storeDimensions !== provider.dimensions) {
+    return {
+      status: "mismatch",
+      provider: provider.provider,
+      modelName: provider.modelName,
+      dimensions: provider.dimensions,
+      configHash,
+      reason: `Vector store dimensions ${storeDimensions} do not match embedding dimensions ${provider.dimensions}.`
+    };
+  }
+
+  return {
+    status: "compatible",
+    provider: provider.provider,
+    modelName: provider.modelName,
+    dimensions: provider.dimensions,
+    configHash,
+    reason: "Vector store dimensions match embedding dimensions."
+  };
+}
+
+function currentEmbeddingConfigHash(runtime: LiveAssembledRagRuntime): string | undefined {
+  const adapter = runtime.providerAdapters.embeddingAdapter;
+  return adapter === undefined
+    ? undefined
+    : embeddingConfigHashFor({
+        provider: adapter.provider,
+        modelName: adapter.modelName,
+        dimensions: adapter.dimensions,
+        adapterId: adapter.id
+      });
+}
+
+function currentVisualEmbeddingConfigHash(runtime: LiveAssembledRagRuntime): string | undefined {
+  const adapter = runtime.providerAdapters.visualEmbeddingAdapter;
+  return adapter === undefined
+    ? undefined
+    : embeddingConfigHashFor({
+        provider: adapter.provider,
+        modelName: adapter.modelName,
+        dimensions: adapter.dimensions,
+        adapterId: adapter.id
+      });
+}
+
+function generationHealth(
+  vectorStore: Pick<VectorStore | VisualVectorStore, "snapshot">,
+  activeConfigHash: string | undefined
+): ProductionGenerationHealth {
+  try {
+    const snapshot = vectorStore.snapshot();
+    if (isPromiseLike(snapshot)) {
+      return {};
+    }
+    return generationHealthFromInventory(vectorGenerationInventory(snapshot), activeConfigHash);
+  } catch {
+    return {};
+  }
+}
+
+async function generationHealthAsync(
+  vectorStore: Pick<VectorStore | VisualVectorStore, "snapshot">,
+  activeConfigHash: string | undefined
+): Promise<ProductionGenerationHealth> {
+  try {
+    if (isVectorGenerationInventoryProvider(vectorStore)) {
+      const inventory = await vectorStore.vectorGenerationInventory();
+      return generationHealthFromInventory(inventory, activeConfigHash);
+    }
+
+    const snapshot = await vectorStore.snapshot();
+    return generationHealthFromInventory(vectorGenerationInventory(snapshot), activeConfigHash);
+  } catch {
+    return {};
+  }
+}
+
+function generationHealthFromInventory(
+  inventory: readonly VectorGenerationInventoryEntry[],
+  activeConfigHash: string | undefined
+): ProductionGenerationHealth {
+  const oldGenerations =
+    activeConfigHash === undefined
+      ? []
+      : inventory.filter((entry) => entry.embeddingConfigHash !== activeConfigHash);
+  return {
+    generationCount: inventory.length,
+    ...(oldGenerations.length === 0 ? {} : { oldGenerationCount: oldGenerations.length })
   };
 }
 
@@ -1040,6 +1325,7 @@ function loadHttpConfigFromEnv(
     port: port ?? fallbackPort,
     maxBodyBytes: maxBodyBytes ?? fallbackMaxBodyBytes,
     auth: loadHttpAuthConfigFromEnv(env, fallback?.auth),
+    principal: loadHttpPrincipalConfigFromEnv(env, fallback?.principal),
     rateLimit: loadHttpRateLimitConfigFromEnv(env, fallback?.rateLimit),
     operations: loadHttpOperationsConfigFromEnv(env, fallback?.operations)
   };
@@ -1079,6 +1365,65 @@ function loadHttpAuthConfigFromEnv(
     mode,
     headerName,
     tokenSha256s
+  };
+}
+
+function loadHttpPrincipalConfigFromEnv(
+  env: ProviderEnv,
+  fallback: ProductionHttpPrincipalConfig | undefined
+): ProductionHttpPrincipalConfig {
+  const mode = readHttpPrincipalMode(
+    readEnv(env, "RAG_PRINCIPAL_MODE"),
+    fallback?.mode ?? DEFAULT_HTTP_CONFIG.principal?.mode ?? "request_body"
+  );
+  const headerName = normalizeHttpHeaderName(
+    readEnv(env, "RAG_PRINCIPAL_HEADER") ??
+      fallback?.headerName ??
+      DEFAULT_HTTP_CONFIG.principal?.headerName ??
+      "x-rag-principal",
+    "RAG_PRINCIPAL_HEADER"
+  );
+  const signatureHeaderName = normalizeHttpHeaderName(
+    readEnv(env, "RAG_PRINCIPAL_SIGNATURE_HEADER") ??
+      fallback?.signatureHeaderName ??
+      DEFAULT_HTTP_CONFIG.principal?.signatureHeaderName ??
+      "x-rag-principal-signature",
+    "RAG_PRINCIPAL_SIGNATURE_HEADER"
+  );
+  const signingSecrets =
+    mode === "signed_header"
+      ? httpPrincipalSigningSecrets(env, fallback)
+      : (fallback?.signingSecrets ?? []);
+  const maxAgeMs = readInteger(
+    readEnv(env, "RAG_PRINCIPAL_MAX_AGE_MS"),
+    "RAG_PRINCIPAL_MAX_AGE_MS",
+    fallback?.maxAgeMs,
+    1,
+    24 * 60 * 60 * 1000
+  );
+  const clockSkewMs = readInteger(
+    readEnv(env, "RAG_PRINCIPAL_CLOCK_SKEW_MS"),
+    "RAG_PRINCIPAL_CLOCK_SKEW_MS",
+    fallback?.clockSkewMs,
+    0,
+    5 * 60 * 1000
+  );
+  const issuer = readEnv(env, "RAG_PRINCIPAL_ISSUER") ?? fallback?.issuer;
+
+  if (mode === "signed_header" && signingSecrets.length === 0) {
+    throw new ProductionRagConfigError(
+      "RAG_PRINCIPAL_SIGNING_SECRET, RAG_PRINCIPAL_SIGNING_SECRET_ENV, or RAG_PRINCIPAL_SIGNING_SECRET_ENVS is required when RAG_PRINCIPAL_MODE=signed_header."
+    );
+  }
+
+  return {
+    mode,
+    headerName,
+    signatureHeaderName,
+    signingSecrets,
+    ...(maxAgeMs === undefined ? {} : { maxAgeMs }),
+    ...(clockSkewMs === undefined ? {} : { clockSkewMs }),
+    ...(issuer === undefined ? {} : { issuer })
   };
 }
 
@@ -1123,6 +1468,18 @@ function loadHttpRateLimitConfigFromEnv(
     maxKeys: maxKeys ?? DEFAULT_HTTP_CONFIG.rateLimit.maxKeys,
     ...(clientIpHeader === undefined ? {} : { clientIpHeader })
   };
+}
+
+function loadAssuranceConfigFromEnv(
+  env: ProviderEnv,
+  fallback: ProductionAssuranceConfig | undefined
+): ProductionAssuranceConfig | undefined {
+  const groundingJudgeRequirement = readGroundingJudgeRequirement(
+    readEnv(env, "RAG_GROUNDING_JUDGE_REQUIREMENT"),
+    fallback?.groundingJudgeRequirement
+  );
+
+  return groundingJudgeRequirement === undefined ? undefined : { groundingJudgeRequirement };
 }
 
 function loadHttpOperationsConfigFromEnv(
@@ -1549,6 +1906,38 @@ function httpAuthTokenEnvNames(env: ProviderEnv): readonly string[] {
   return names.length > 0 ? names : single === undefined ? [] : [single];
 }
 
+function httpPrincipalSigningSecrets(
+  env: ProviderEnv,
+  fallback: ProductionHttpPrincipalConfig | undefined
+): readonly string[] {
+  const secretEnvNames = httpPrincipalSigningSecretEnvNames(env);
+  if (secretEnvNames.length > 0) {
+    return secretEnvNames.map((name) => readRequiredEnv(env, name));
+  }
+
+  const directSecret = readEnv(env, "RAG_PRINCIPAL_SIGNING_SECRET");
+  if (directSecret !== undefined) {
+    return [directSecret];
+  }
+
+  return fallback?.mode === "signed_header" ? fallback.signingSecrets : [];
+}
+
+function httpPrincipalSigningSecretEnvNames(env: ProviderEnv): readonly string[] {
+  const names = readEnv(env, "RAG_PRINCIPAL_SIGNING_SECRET_ENVS")
+    ? readCsvEnv(env, "RAG_PRINCIPAL_SIGNING_SECRET_ENVS")
+    : [];
+  const single = readEnv(env, "RAG_PRINCIPAL_SIGNING_SECRET_ENV");
+
+  if (names.length > 0 && single !== undefined) {
+    throw new ProductionRagConfigError(
+      "Set either RAG_PRINCIPAL_SIGNING_SECRET_ENV or RAG_PRINCIPAL_SIGNING_SECRET_ENVS, not both."
+    );
+  }
+
+  return names.length > 0 ? names : single === undefined ? [] : [single];
+}
+
 function sha256Hex(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
@@ -1575,6 +1964,38 @@ function readHttpAuthMode(
   }
 
   throw new ProductionRagConfigError("RAG_HTTP_AUTH_MODE must be required or disabled.");
+}
+
+function readHttpPrincipalMode(
+  value: string | undefined,
+  fallback: ProductionHttpPrincipalMode
+): ProductionHttpPrincipalMode {
+  if (value === undefined) {
+    return fallback;
+  }
+
+  if (value === "request_body" || value === "signed_header") {
+    return value;
+  }
+
+  throw new ProductionRagConfigError("RAG_PRINCIPAL_MODE must be request_body or signed_header.");
+}
+
+function readGroundingJudgeRequirement(
+  value: string | undefined,
+  fallback: ProductionGroundingJudgeRequirement | undefined
+): ProductionGroundingJudgeRequirement | undefined {
+  if (value === undefined) {
+    return fallback;
+  }
+
+  if (value === "optional" || value === "required" || value === "profile_required") {
+    return value;
+  }
+
+  throw new ProductionRagConfigError(
+    "RAG_GROUNDING_JUDGE_REQUIREMENT must be optional, required, or profile_required."
+  );
 }
 
 function readHttpRateLimitMode(
@@ -1737,15 +2158,6 @@ function optionalString(value: unknown, pathName: string): string | undefined {
   }
 
   return requiredString(value, pathName);
-}
-
-function requiredStringArray(value: unknown, pathName: string): readonly string[] {
-  const parsed = optionalStringArray(value, pathName);
-  if (parsed === undefined || parsed.length === 0) {
-    throw new ProductionRagRequestError(`${pathName} must be a non-empty string array.`);
-  }
-
-  return parsed;
 }
 
 function optionalStringArray(value: unknown, pathName: string): readonly string[] | undefined {

@@ -126,7 +126,12 @@ export function chunkDocument(request: ChunkDocumentRequest): ChunkDocumentResul
           : {})
       },
       accessScope: document.accessScope,
-      ...(document.metadata ? { metadata: document.metadata } : {})
+      metadata: {
+        ...(document.metadata ?? {}),
+        chunkingPolicyId: policy.id,
+        ...(policy.version === undefined ? {} : { chunkingPolicyVersion: policy.version }),
+        chunkerVersion: "1"
+      }
     });
   }
 
@@ -323,7 +328,7 @@ function windowsWithProtectedRanges(
         ...createUnprotectedTextWindows(body.slice(cursor, range.characterStart), policy, cursor)
       );
     }
-    windows.push(...makeWindow(body, range.characterStart, range.characterEnd, policy, 0, true));
+    windows.push(...protectedTextWindows(body, range, policy));
     cursor = range.characterEnd;
   }
 
@@ -332,6 +337,22 @@ function windowsWithProtectedRanges(
   }
 
   return windows;
+}
+
+function protectedTextWindows(
+  body: string,
+  range: ProtectedRange,
+  policy: ChunkingPolicy
+): readonly TextWindow[] {
+  if (range.characterEnd - range.characterStart <= policy.maxCharacters) {
+    return makeWindow(body, range.characterStart, range.characterEnd, policy, 0, true);
+  }
+
+  return createUnprotectedTextWindows(
+    body.slice(range.characterStart, range.characterEnd),
+    policy,
+    range.characterStart
+  ).map((window) => ({ ...window, isProtected: true }));
 }
 
 function createUnprotectedTextWindows(
@@ -744,6 +765,10 @@ export function assertValidChunkingPolicy(policy: ChunkingPolicy): void {
 
   if (!policy.id.trim()) {
     issues.push("id is required.");
+  }
+
+  if (policy.version !== undefined && !policy.version.trim()) {
+    issues.push("version cannot be blank.");
   }
 
   if (!Number.isInteger(policy.maxCharacters) || policy.maxCharacters < 1) {

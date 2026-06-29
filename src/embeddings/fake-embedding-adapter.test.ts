@@ -2,11 +2,17 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { cosineSimilarity, vectorMagnitude } from "../shared/vector-math.js";
+import { runEmbeddingAdapterContract } from "../test-support/embedding-adapter-contract.js";
 import {
   FakeEmbeddingAdapter,
   embedText,
   tokenizeEmbeddingText
 } from "./fake-embedding-adapter.js";
+
+runEmbeddingAdapterContract({
+  name: "FakeEmbeddingAdapter",
+  createAdapter: () => new FakeEmbeddingAdapter({ dimensions: 16 })
+});
 
 test("fake embeddings are deterministic, normalized, and token based", async () => {
   const adapter = new FakeEmbeddingAdapter({ dimensions: 16 });

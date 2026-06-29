@@ -6,6 +6,14 @@ import type { SourceConnector, SourceSyncMode } from "../sync/source-connector.j
 import type { SourceSyncLedger } from "../sync/sync-ledger.js";
 import { ProductionRagRequestError, type ProductionRagApp } from "./production-app.js";
 import {
+  PostgresIngestionCheckpointStore,
+  PostgresIngestionJobStore,
+  PostgresIngestionProgressStore,
+  type IngestionCheckpointStore,
+  type IngestionJobStore,
+  type IngestionProgressStore
+} from "./ingestion-job.js";
+import {
   SourceSyncWorkflowRunner,
   type SourceSyncWorkflowKnowledgeIngestionOptions,
   type SourceSyncWorkflowResult
@@ -16,6 +24,9 @@ export interface ProductionSourceSyncRuntimeOptions {
   readonly connector: SourceConnector;
   readonly knowledgeIngestion?: SourceSyncWorkflowKnowledgeIngestionOptions;
   readonly chunkingPolicy?: ChunkingPolicy;
+  readonly jobStore?: IngestionJobStore;
+  readonly checkpointStore?: IngestionCheckpointStore;
+  readonly progressStore?: IngestionProgressStore;
   readonly now?: () => string;
 }
 
@@ -38,10 +49,18 @@ export interface ProductionSourceSyncRuntime {
 export function createProductionSourceSyncRuntime(
   options: ProductionSourceSyncRuntimeOptions
 ): ProductionSourceSyncRuntime {
+  const jobStore = options.jobStore ?? defaultSourceSyncIngestionJobStore(options.app);
+  const checkpointStore =
+    options.checkpointStore ?? defaultSourceSyncIngestionCheckpointStore(options.app);
+  const progressStore =
+    options.progressStore ?? defaultSourceSyncIngestionProgressStore(options.app);
   const workflow = new SourceSyncWorkflowRunner({
     connector: options.connector,
     documentStore: options.app.chunkStore,
     chunkStore: options.app.chunkStore,
+    ...(jobStore === undefined ? {} : { jobStore }),
+    ...(checkpointStore === undefined ? {} : { checkpointStore }),
+    ...(progressStore === undefined ? {} : { progressStore }),
     ...(options.app.sourceSyncLedgerStore === undefined
       ? {}
       : { ledgerStore: options.app.sourceSyncLedgerStore }),
@@ -84,6 +103,49 @@ export function createProductionSourceSyncRuntime(
       });
     }
   };
+}
+
+function defaultSourceSyncIngestionJobStore(app: ProductionRagApp): IngestionJobStore | undefined {
+  const index = app.config.storage.index;
+  if (index.kind !== "postgres") {
+    return undefined;
+  }
+
+  return new PostgresIngestionJobStore({
+    connectionString: index.connectionString,
+    poolConfig: { allowExitOnIdle: true },
+    ...(index.schema === undefined ? {} : { schema: index.schema })
+  });
+}
+
+function defaultSourceSyncIngestionCheckpointStore(
+  app: ProductionRagApp
+): IngestionCheckpointStore | undefined {
+  const index = app.config.storage.index;
+  if (index.kind !== "postgres") {
+    return undefined;
+  }
+
+  return new PostgresIngestionCheckpointStore({
+    connectionString: index.connectionString,
+    poolConfig: { allowExitOnIdle: true },
+    ...(index.schema === undefined ? {} : { schema: index.schema })
+  });
+}
+
+function defaultSourceSyncIngestionProgressStore(
+  app: ProductionRagApp
+): IngestionProgressStore | undefined {
+  const index = app.config.storage.index;
+  if (index.kind !== "postgres") {
+    return undefined;
+  }
+
+  return new PostgresIngestionProgressStore({
+    connectionString: index.connectionString,
+    poolConfig: { allowExitOnIdle: true },
+    ...(index.schema === undefined ? {} : { schema: index.schema })
+  });
 }
 
 function productionSourceById(app: ProductionRagApp, sourceId: string): CorpusSourceConfig {

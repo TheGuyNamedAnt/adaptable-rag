@@ -3,6 +3,7 @@ import type { RagDocument } from "../documents/document.js";
 import type { DocumentVisualAsset, LayoutBox } from "../documents/layout.js";
 import type { CitationVisualAsset } from "../documents/provenance.js";
 import type { VisualChunkVector, VisualVectorStore } from "../indexing/visual-vector-store.js";
+import { embeddingIdentityFor, embeddingIndexConfigHashFor } from "./embedding-identity.js";
 import type { VisualEmbeddingAdapter, VisualEmbeddingInput } from "./visual-embedding-types.js";
 
 export interface VisualEmbeddingIndexerOptions {
@@ -113,6 +114,12 @@ export class VisualEmbeddingIndexer {
     const embeddingsByInputId = new Map(
       result.embeddings.map((embedding) => [embedding.id, embedding])
     );
+    const identity = embeddingIdentityFor({
+      provider: result.provider,
+      modelName: result.modelName,
+      dimensions: result.dimensions,
+      adapterId: this.adapter.id
+    });
     const visualVectors: VisualChunkVector[] = [];
 
     for (const entry of inputs) {
@@ -147,14 +154,24 @@ export class VisualEmbeddingIndexer {
         continue;
       }
 
+      const indexConfigHash = embeddingIndexConfigHashFor({
+        provider: result.provider,
+        modelName: result.modelName,
+        dimensions: result.dimensions,
+        adapterId: this.adapter.id,
+        ...optionalIdentityMetadata(entry.chunk.metadata)
+      });
+
       visualVectors.push({
-        id: visualVectorId(result.modelName, entry.chunk.id, entry.asset.id),
+        id: visualVectorId(identity.embeddingConfigHash, entry.chunk.id, entry.asset.id),
         chunkId: entry.chunk.id,
         documentId: entry.chunk.documentId,
         tenantId: entry.chunk.accessScope.tenantId,
         namespaceId: entry.chunk.namespaceId,
         textHash: entry.chunk.textHash,
         embeddingModel: result.modelName,
+        embeddingProvider: result.provider,
+        embeddingConfigHash: identity.embeddingConfigHash,
         dimensions: result.dimensions,
         vectors: embedding.vectors,
         embeddedAt,
@@ -166,7 +183,14 @@ export class VisualEmbeddingIndexer {
           : { layoutRegionIds: layoutRegionIdsForChunk(entry.chunk) }),
         ...(boundingBoxesForChunk(entry.chunk, entry.asset).length === 0
           ? {}
-          : { boundingBoxes: boundingBoxesForChunk(entry.chunk, entry.asset) })
+          : { boundingBoxes: boundingBoxesForChunk(entry.chunk, entry.asset) }),
+        metadata: {
+          ...(entry.chunk.metadata ?? {}),
+          embeddingProvider: result.provider,
+          embeddingAdapterId: this.adapter.id,
+          embeddingConfigHash: identity.embeddingConfigHash,
+          embeddingIndexConfigHash: indexConfigHash
+        }
       });
     }
 
@@ -340,8 +364,12 @@ function hasVisualAnchor(chunk: RagChunk): boolean {
   );
 }
 
-function visualVectorId(modelName: string, chunkId: string, visualAssetId: string): string {
-  return `${sanitizeId(modelName)}_${sanitizeId(visualAssetId)}_${chunkId}`;
+function visualVectorId(
+  embeddingConfigHash: string,
+  chunkId: string,
+  visualAssetId: string
+): string {
+  return `${embeddingConfigHash}_${sanitizeId(visualAssetId)}_${chunkId}`;
 }
 
 function visualInputId(chunkId: string, visualAssetId: string): string {
@@ -460,6 +488,35 @@ function metadataString(asset: DocumentVisualAsset, key: string): string | undef
   }
 
   return undefined;
+}
+
+function chunkMetadataString(
+  metadata: Readonly<Record<string, string | number | boolean>> | undefined,
+  key: string
+): string | undefined {
+  const value = metadata?.[key];
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function optionalIdentityMetadata(
+  metadata: Readonly<Record<string, string | number | boolean>> | undefined
+): {
+  readonly chunkingPolicyId?: string;
+  readonly chunkingPolicyVersion?: string;
+  readonly chunkerVersion?: string;
+  readonly preprocessingVersion?: string;
+} {
+  const chunkingPolicyId = chunkMetadataString(metadata, "chunkingPolicyId");
+  const chunkingPolicyVersion = chunkMetadataString(metadata, "chunkingPolicyVersion");
+  const chunkerVersion = chunkMetadataString(metadata, "chunkerVersion");
+  const preprocessingVersion = chunkMetadataString(metadata, "preprocessingVersion");
+
+  return {
+    ...(chunkingPolicyId === undefined ? {} : { chunkingPolicyId }),
+    ...(chunkingPolicyVersion === undefined ? {} : { chunkingPolicyVersion }),
+    ...(chunkerVersion === undefined ? {} : { chunkerVersion }),
+    ...(preprocessingVersion === undefined ? {} : { preprocessingVersion })
+  };
 }
 
 function boxesOverlap(first: LayoutBox, second: LayoutBox): boolean {

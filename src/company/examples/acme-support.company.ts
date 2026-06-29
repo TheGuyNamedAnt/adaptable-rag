@@ -1,6 +1,7 @@
 import type { CorpusAdapter, CorpusLoadRequest, CorpusLoadResult } from "../../corpus/adapter.js";
 import type { CorpusRecord } from "../../corpus/corpus-record.js";
 import { genericDocsProfile } from "../../profiles/examples/generic-docs.profile.js";
+import { ownerDefinedAclMapper } from "../../security/connector-acl-mapper.js";
 import { hashText } from "../../shared/hash.js";
 import type {
   SourceConnector,
@@ -8,6 +9,7 @@ import type {
   SourceConnectorSyncResult
 } from "../../sync/source-connector.js";
 import type { CompanyAdapterPack } from "../company-adapter-pack.js";
+import type { CompanyDeploymentManifest } from "../company-deployment-module.js";
 import type { CompanyProfile } from "../company-profile.js";
 
 export const acmeSupportCompanyProfile: CompanyProfile = {
@@ -128,21 +130,70 @@ export const acmeSupportAdapterPack: CompanyAdapterPack = {
   description: "Acme support adapter pack.",
   corpusAdapters: [new AcmeSupportCorpusAdapter()],
   sourceConnectors: [new AcmeSupportSourceConnector()],
+  permissionMappers: [
+    {
+      sourceSystem: "acme-api",
+      mapper: ownerDefinedAclMapper({
+        id: "acme-support-acl-mapper",
+        description: "Maps Acme API ACL claims into portable RAG access scope.",
+        map: ({ nativeAcl, context }) => {
+          const acl = asRecord(nativeAcl);
+          const role = firstString(acl?.["role"]);
+          const groups = stringList(acl?.["groups"]);
+          const userId = firstString(acl?.["user_id"]);
+          return {
+            tenantId: firstString(acl?.["tenant_id"]) ?? context.defaultTenantId,
+            namespaceId: firstString(acl?.["workspace_id"]) ?? context.defaultNamespaceId,
+            ...(userId === undefined ? {} : { userIds: [userId] }),
+            roles: role === undefined ? ["support"] : [role],
+            tags: uniqueSorted([...context.defaultTags, ...groups])
+          };
+        }
+      })
+    }
+  ],
   connectorTests: [
     {
       connectorId: "support_api",
       command:
-        "npm run company:validate -- --module dist/company/examples/acme-support.company.js --export acmeSupportCompanyProfile --adapter-pack-export acmeSupportAdapterPack --run-pack-contracts --use-case support"
+        "npm run company:validate -- --module dist/company/examples/acme-support.company.js --export acmeSupportDeployment --run-pack-contracts --use-case support"
     }
   ]
 };
 
 export const acmeSupportAdapterPacks = [acmeSupportAdapterPack] as const;
 
-export const acmeSupportDeployment = {
+export const acmeSupportDeployment: CompanyDeploymentManifest = {
   company: acmeSupportCompanyProfile,
-  adapterPacks: acmeSupportAdapterPacks
-} as const;
+  adapterPacks: acmeSupportAdapterPacks,
+  environment: {
+    requiredEnv: ["RAG_DATABASE_URL"],
+    optionalEnv: [
+      "RAG_COMPANY_DEPLOYMENT_EXPORT",
+      "RAG_COMPANY_USE_CASE_ID",
+      "RAG_COMPANY_NAMESPACE_ID",
+      "RAG_COMPANY_PACK_CONTRACT_MODE"
+    ]
+  },
+  evals: {
+    requiredPaths: [
+      "profiles/acme/support/golden.jsonl",
+      "profiles/acme/support/adversarial.jsonl"
+    ],
+    goldenSetPaths: ["profiles/acme/support/golden.jsonl"],
+    adversarialSetPaths: ["profiles/acme/support/adversarial.jsonl"]
+  },
+  smoke: {
+    validateCommand:
+      "npm run company:validate -- --module dist/company/examples/acme-support.company.js --export acmeSupportDeployment --run-pack-contracts --use-case support --principal-role support --principal-tag trusted",
+    smokeCommand:
+      "npm run company:smoke -- --export acmeSupportDeployment --use-case support --tenant-id tenant_acme --namespace-id acme-support --source-id support_docs",
+    postgresSmokeCommand:
+      "npm run company:smoke:postgres -- --export acmeSupportDeployment --use-case support --tenant-id tenant_acme --namespace-id acme-support --source-id support_docs"
+  }
+};
+
+export const companyDeployment = acmeSupportDeployment;
 
 function acmeSupportRecord(request: CorpusLoadRequest | SourceConnectorSyncRequest): CorpusRecord {
   const body =
@@ -165,4 +216,38 @@ function acmeSupportRecord(request: CorpusLoadRequest | SourceConnectorSyncReque
     capturedAt: request.requestedAt,
     checksum: hashText(body)
   };
+}
+
+function asRecord(value: unknown): Readonly<Record<string, unknown>> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Readonly<Record<string, unknown>>)
+    : undefined;
+}
+
+function firstString(value: unknown): string | undefined {
+  if (typeof value === "string" && value.trim()) {
+    return value.trim();
+  }
+  if (Array.isArray(value)) {
+    return value
+      .find((entry): entry is string => typeof entry === "string" && Boolean(entry.trim()))
+      ?.trim();
+  }
+  return undefined;
+}
+
+function stringList(value: unknown): readonly string[] {
+  if (typeof value === "string" && value.trim()) {
+    return [value.trim()];
+  }
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .filter((entry): entry is string => typeof entry === "string" && Boolean(entry.trim()))
+    .map((entry) => entry.trim());
+}
+
+function uniqueSorted(values: readonly string[]): readonly string[] {
+  return [...new Set(values.filter(Boolean))].sort();
 }

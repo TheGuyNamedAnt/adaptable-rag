@@ -20,6 +20,7 @@ import type {
   IndexSnapshot,
   IndexStats
 } from "./index-types.js";
+import { LOCAL_INDEX_SCALE_CAPABILITIES } from "./scale-capabilities.js";
 
 export interface InMemoryRagIndexOptions {
   readonly now?: () => string;
@@ -34,7 +35,8 @@ export class InMemoryRagIndex implements DocumentStore, ChunkStore {
     enforcesAccessFilters: true,
     supportsKeywordScan: true,
     supportsVectorSearch: false,
-    supportsHybridSearch: false
+    supportsHybridSearch: false,
+    scale: LOCAL_INDEX_SCALE_CAPABILITIES
   };
 
   private readonly documents = new Map<string, IndexedDocument>();

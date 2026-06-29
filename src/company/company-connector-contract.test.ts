@@ -102,6 +102,39 @@ class UnsafeConnector implements SourceConnector {
   }
 }
 
+class LeakyErrorConnector implements SourceConnector {
+  readonly id = "docs";
+  readonly description = "Leaky error fixture source connector.";
+
+  async sync(request: SourceConnectorSyncRequest): Promise<SourceConnectorSyncResult> {
+    const body = "Private customer contract clause should never appear in diagnostics.";
+    return {
+      sourceId: request.source.id,
+      complete: false,
+      items: [
+        {
+          operation: "upsert",
+          sourceItemId: "source_item_private",
+          version: "1",
+          record: record({
+            id: "doc_private",
+            sourceId: request.source.id,
+            body
+          })
+        },
+        {
+          operation: "error",
+          sourceItemId: "source_item_error",
+          recordId: "doc_error",
+          errorCode: "parse_failed",
+          message: `Parser failed near text: ${body}`,
+          retryable: false
+        }
+      ]
+    };
+  }
+}
+
 const principal = makePrincipal({
   tenantId: "tenant_acme",
   namespaceIds: ["acme-docs"],
@@ -182,6 +215,23 @@ test("company connector contract runner reports unsafe connector output", async 
 
   assert.ok(thrown instanceof CompanyConnectorContractError);
   assert.equal(thrown.report.status, "failed");
+});
+
+test("company connector contract runner rejects connector errors that copy record bodies", async () => {
+  const report = await runCompanyConnectorContractTests({
+    registry: registryWith(new LeakyErrorConnector()),
+    company: { companyId: "acme", useCaseId: "docs" },
+    requestedBy: principal,
+    modes: ["delta"],
+    requestedAt: FIXED_NOW,
+    now: () => FIXED_NOW
+  });
+
+  assert.equal(report.status, "failed");
+  assert.equal(
+    report.errors.some((error) => error.code === "connector_error_leaks_record_body"),
+    true
+  );
 });
 
 function registryWith(connector: SourceConnector): CompanyDeploymentRegistry {

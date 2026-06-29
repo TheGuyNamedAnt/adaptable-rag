@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import base64
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -34,7 +35,7 @@ def parse_pdf(request: dict[str, Any]) -> dict[str, Any]:
         body, regions = build_body_and_regions(pages)
         layout = {
             "parserId": "pdf-rag-parser",
-            "strategy": "text_layer",
+            "strategy": "text_extraction",
             "pages": [
                 {
                     "pageNumber": page["pageNumber"],
@@ -45,17 +46,7 @@ def parse_pdf(request: dict[str, Any]) -> dict[str, Any]:
                 for page in pages
             ]
             or [{"pageNumber": 1, "width": 1, "height": 1, "unit": "point"}],
-            "regions": regions
-            or [
-                {
-                    "id": "empty_pdf_text_layer",
-                    "kind": "paragraph",
-                    "pageNumber": 1,
-                    "text": body,
-                    "characterStart": 0,
-                    "characterEnd": len(body),
-                }
-            ],
+            "regions": regions,
             "tables": [],
             "visualAssets": [],
             "metadata": {
@@ -84,13 +75,13 @@ def parse_pdf(request: dict[str, Any]) -> dict[str, Any]:
 
 def materialize_source(request: dict[str, Any]) -> tuple[Path, tempfile.TemporaryDirectory[str] | None]:
     path = request.get("path")
-    if isinstance(path, str) and path and Path(path).exists():
+    if isinstance(path, str) and path and local_path_allowed(Path(path)):
         return Path(path), None
 
     origin_uri = request.get("originUri")
     if isinstance(origin_uri, str) and origin_uri.startswith("file://"):
         file_path = Path(origin_uri.removeprefix("file://"))
-        if file_path.exists():
+        if local_path_allowed(file_path):
             return file_path, None
 
     cleanup_dir = tempfile.TemporaryDirectory(prefix="pdf-rag-")
@@ -101,7 +92,25 @@ def materialize_source(request: dict[str, Any]) -> tuple[Path, tempfile.Temporar
         source_path.write_bytes(base64.b64decode(bytes_base64))
         return source_path, cleanup_dir
 
-    raise ValueError("PDF parser requires path, file:// originUri, or bytesBase64.")
+    raise ValueError("PDF parser requires an allowed path, allowed file:// originUri, or bytesBase64.")
+
+
+def local_path_allowed(path: Path) -> bool:
+    if not path.exists():
+        return False
+    if os.environ.get("RAG_PARSER_ALLOW_LOCAL_PATHS", "").lower() not in {"1", "true", "yes"}:
+        return False
+    roots = [entry for entry in os.environ.get("RAG_PARSER_ALLOWED_ROOTS", "").split(os.pathsep) if entry]
+    if not roots:
+        return True
+    resolved = path.resolve()
+    for root in roots:
+        try:
+            resolved.relative_to(Path(root).resolve())
+            return True
+        except ValueError:
+            continue
+    return False
 
 
 def extract_pages(source_path: Path) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:

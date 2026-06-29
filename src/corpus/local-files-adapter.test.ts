@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 
 import type { DocumentLayout } from "../documents/layout.js";
 import type { DocumentParser, DocumentParseResult } from "../parsing/parser.js";
@@ -137,9 +138,100 @@ test("loads parser-backed local files with layout evidence", async () => {
 
     assert.equal(result.rejectedRecords.length, 0);
     assert.equal(result.documents.length, 1);
-    assert.equal(result.chunks.length, 1);
-    assert.deepEqual(result.chunks[0]?.citation.layoutRegionIds, ["region_title", "region_body"]);
-    assert.equal(result.chunks[0]?.citation.boundingBoxes?.length, 2);
+    assert.equal(result.chunks.length, 3);
+    const layoutRegionIds = result.chunks.flatMap((chunk) => chunk.citation.layoutRegionIds ?? []);
+    assert.equal(layoutRegionIds.includes("region_title"), true);
+    assert.equal(layoutRegionIds.includes("region_body"), true);
+    assert.equal(
+      result.chunks.reduce(
+        (count, chunk) => count + (chunk.citation.boundingBoxes?.length ?? 0),
+        0
+      ),
+      5
+    );
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("parser-backed local files respect parserConcurrency and keep deterministic outputs", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "rag-local-files-"));
+  try {
+    for (const filename of ["a.pdf", "b.pdf", "c.pdf", "d.pdf"]) {
+      await writeFile(path.join(tempDir, filename), new Uint8Array([37, 80, 68, 70]));
+    }
+
+    let activeParses = 0;
+    let maxActiveParses = 0;
+    const parser: DocumentParser = {
+      id: "slow-pdf-parser",
+      description: "Slow fixture parser for concurrency tests.",
+      version: "1.0.0",
+      capabilities: {
+        inputMode: "binary",
+        emitsLayout: false,
+        emitsTables: false,
+        emitsVisualAssets: false,
+        supportedContentTypes: ["application/pdf"]
+      },
+      async parse(request): Promise<DocumentParseResult> {
+        activeParses += 1;
+        maxActiveParses = Math.max(maxActiveParses, activeParses);
+        try {
+          await delay(delayForPath(request.path));
+          return {
+            sourceId: request.sourceId,
+            parserId: "slow-pdf-parser",
+            parserVersion: "1.0.0",
+            document: {
+              body: `Parsed ${request.path ?? "unknown"}`
+            },
+            warnings: [
+              {
+                code: "concurrency_probe",
+                message: `Completed ${request.path ?? "unknown"}`
+              }
+            ]
+          };
+        } finally {
+          activeParses -= 1;
+        }
+      }
+    };
+
+    const loaded = await new LocalFilesCorpusAdapter({
+      parsers: [parser],
+      sources: [
+        {
+          sourceId: genericSource.id,
+          rootDir: tempDir,
+          includeExtensions: [".pdf"],
+          parserId: parser.id,
+          parserConcurrency: 2,
+          capturedAt: FIXED_NOW
+        }
+      ]
+    }).load({
+      profile: genericProfile,
+      source: genericSource,
+      requestedBy: makePrincipal({
+        tenantId: "tenant_1",
+        namespaceIds: [genericProfile.namespaceId],
+        tags: ["curated", "docs"]
+      }),
+      runId: "local_files_concurrent_parser_test",
+      requestedAt: FIXED_NOW
+    });
+
+    assert.equal(maxActiveParses, 2);
+    assert.deepEqual(
+      loaded.records.map((record) => record?.path),
+      ["a.pdf", "b.pdf", "c.pdf", "d.pdf"]
+    );
+    assert.deepEqual(
+      loaded.warnings.map((warning) => warning.message.match(/for ([^:]+):/u)?.[1]),
+      ["a.pdf", "b.pdf", "c.pdf", "d.pdf"]
+    );
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
@@ -897,6 +989,21 @@ function fixtureParser(options: {
       };
     }
   };
+}
+
+function delayForPath(filePath: string | undefined): number {
+  switch (filePath) {
+    case "a.pdf":
+      return 40;
+    case "b.pdf":
+      return 5;
+    case "c.pdf":
+      return 15;
+    case "d.pdf":
+      return 1;
+    default:
+      return 1;
+  }
 }
 
 function layoutForParsedBody(body: string): DocumentLayout {

@@ -7,6 +7,7 @@ import type { CorpusAdapter, CorpusLoadRequest, CorpusLoadResult } from "../corp
 import { CorpusAdapterRegistry } from "../corpus/adapter-registry.js";
 import type { CorpusRecord } from "../corpus/corpus-record.js";
 import type { RagChunk } from "../documents/chunk.js";
+import type { DocumentLayout } from "../documents/layout.js";
 import { InMemoryRagIndex } from "../indexing/in-memory-index.js";
 import type { IndexChunkOptions, IndexOperationResult } from "../indexing/index-types.js";
 import { genericDocsProfile } from "../profiles/examples/generic-docs.profile.js";
@@ -102,6 +103,169 @@ function record(overrides: Partial<CorpusRecord> = {}): CorpusRecord {
   };
 }
 
+function parserPreservationBody(): string {
+  return [
+    "Revenue Summary",
+    "Table 1: Revenue by quarter",
+    "Quarter | Revenue",
+    "Q1 | 100",
+    "gross_margin = gross_profit / revenue",
+    "Chart A",
+    "OCR note"
+  ].join("\n");
+}
+
+function parserPreservationLayout(body: string): DocumentLayout {
+  const title = span(body, "Revenue Summary");
+  const tableCaption = span(body, "Table 1: Revenue by quarter");
+  const tableText = span(body, "Quarter | Revenue\nQ1 | 100");
+  const headerQuarter = span(body, "Quarter");
+  const headerRevenue = span(body, "Revenue", tableText.start);
+  const q1 = span(body, "Q1");
+  const revenue100 = span(body, "100");
+  const equation = span(body, "gross_margin = gross_profit / revenue");
+  const figureCaption = span(body, "Chart A");
+  const ocrNote = span(body, "OCR note");
+
+  return {
+    parserId: "fixture-parser-preservation",
+    parserVersion: "1.0.0",
+    strategy: "hybrid",
+    pages: [
+      {
+        pageNumber: 1,
+        width: 600,
+        height: 800,
+        unit: "point"
+      },
+      {
+        pageNumber: 2,
+        width: 600,
+        height: 800,
+        unit: "point"
+      }
+    ],
+    regions: [
+      region("region_title", "title", 1, body, title, box(1, 40, 40, 360, 28)),
+      region(
+        "region_table_caption",
+        "table_caption",
+        1,
+        body,
+        tableCaption,
+        box(1, 40, 90, 360, 24)
+      ),
+      region("region_table", "table", 1, body, tableText, box(1, 40, 130, 420, 90)),
+      region("region_header_quarter", "text", 1, body, headerQuarter, box(1, 48, 140, 120, 20)),
+      region("region_header_revenue", "text", 1, body, headerRevenue, box(1, 190, 140, 120, 20)),
+      region("region_cell_q1", "text", 1, body, q1, box(1, 48, 170, 120, 20)),
+      region("region_cell_100", "text", 1, body, revenue100, box(1, 190, 170, 120, 20)),
+      region("region_equation_margin", "equation", 1, body, equation, box(1, 40, 230, 360, 28)),
+      region(
+        "region_figure_caption",
+        "figure_caption",
+        2,
+        body,
+        figureCaption,
+        box(2, 40, 90, 180, 24)
+      ),
+      {
+        id: "region_figure",
+        kind: "figure",
+        pageNumber: 2,
+        box: box(2, 40, 130, 320, 180)
+      },
+      {
+        id: "region_page_image",
+        kind: "page_image",
+        pageNumber: 2,
+        box: box(2, 0, 0, 600, 800)
+      },
+      region("region_ocr_note", "text", 2, body, ocrNote, box(2, 40, 330, 180, 24))
+    ],
+    relations: [
+      {
+        id: "relation_caption_for_figure",
+        kind: "caption_for",
+        fromRegionId: "region_figure_caption",
+        toRegionId: "region_figure"
+      }
+    ],
+    tables: [
+      {
+        id: "table_revenue",
+        pageNumber: 1,
+        regionId: "region_table",
+        captionRegionId: "region_table_caption",
+        box: box(1, 40, 130, 420, 90),
+        cells: [
+          { rowIndex: 0, columnIndex: 0, text: "Quarter", regionId: "region_header_quarter" },
+          { rowIndex: 0, columnIndex: 1, text: "Revenue", regionId: "region_header_revenue" },
+          { rowIndex: 1, columnIndex: 0, text: "Q1", regionId: "region_cell_q1" },
+          { rowIndex: 1, columnIndex: 1, text: "100", regionId: "region_cell_100" }
+        ],
+        summary: "Revenue table has one Q1 row."
+      }
+    ],
+    visualAssets: [
+      {
+        id: "figure_1",
+        kind: "figure",
+        pageNumber: 2,
+        mediaType: "image/png",
+        uri: "memory://chart-a.png",
+        box: box(2, 40, 130, 320, 180)
+      }
+    ]
+  };
+}
+
+function span(
+  body: string,
+  text: string,
+  fromIndex = 0
+): { readonly start: number; readonly end: number } {
+  const start = body.indexOf(text, fromIndex);
+  assert.notEqual(start, -1, `fixture span not found: ${text}`);
+  return { start, end: start + text.length };
+}
+
+function region(
+  id: string,
+  kind: NonNullable<DocumentLayout["regions"][number]>["kind"],
+  pageNumber: number,
+  body: string,
+  textSpan: { readonly start: number; readonly end: number },
+  layoutBox: NonNullable<DocumentLayout["regions"][number]["box"]>
+): DocumentLayout["regions"][number] {
+  return {
+    id,
+    kind,
+    pageNumber,
+    text: body.slice(textSpan.start, textSpan.end),
+    characterStart: textSpan.start,
+    characterEnd: textSpan.end,
+    box: layoutBox
+  };
+}
+
+function box(
+  pageNumber: number,
+  x: number,
+  y: number,
+  width: number,
+  height: number
+): NonNullable<DocumentLayout["regions"][number]["box"]> {
+  return {
+    pageNumber,
+    x,
+    y,
+    width,
+    height,
+    unit: "point"
+  };
+}
+
 test("ingests adapter records through normalization, chunking, and indexing", async () => {
   const index = new InMemoryRagIndex({ now: () => FIXED_NOW });
   const registry = new CorpusAdapterRegistry([new StaticAdapter([record()])]);
@@ -132,6 +296,90 @@ test("ingests adapter records through normalization, chunking, and indexing", as
   assert.equal(result.rejectedRecords.length, 0);
   assert.equal(index.findDocuments(filter).length, 1);
   assert.equal(index.findChunks(filter).length, 1);
+});
+
+test("ingests parser-derived searchable artifacts into the RAG chunk store", async () => {
+  const body = parserPreservationBody();
+  const index = new InMemoryRagIndex({ now: () => FIXED_NOW });
+  const registry = new CorpusAdapterRegistry([
+    new StaticAdapter([
+      record({
+        id: "record_parser_searchability",
+        title: "Parser Searchability",
+        body,
+        layout: parserPreservationLayout(body),
+        metadata: {
+          contentType: "application/pdf"
+        }
+      })
+    ])
+  ]);
+  const pipeline = new IngestPipeline({
+    adapterRegistry: registry,
+    documentStore: index,
+    chunkStore: index,
+    now: () => FIXED_NOW
+  });
+
+  const result = await pipeline.ingest({
+    profile,
+    requestedBy: principal,
+    runId: "ingest_parser_searchability",
+    requestedAt: FIXED_NOW
+  });
+  const storedChunks = index
+    .findChunks(
+      makeIndexFilter({
+        namespaceId: genericDocsProfile.namespaceId,
+        principal,
+        tenantId: principal.tenantId
+      })
+    )
+    .map((indexed) => indexed.chunk);
+  const storedUnitTypes = new Set(
+    storedChunks
+      .map((chunk) => chunk.metadata?.["searchableUnitType"])
+      .filter((unitType): unitType is string => typeof unitType === "string")
+  );
+
+  assert.equal(result.documents.length, 1);
+  assert.equal(result.searchableArtifactWarnings?.length ?? 0, 0);
+  assert.equal(storedChunks.length, result.chunks.length);
+  for (const unitType of [
+    "table_chunk",
+    "table_row_chunk",
+    "table_caption_chunk",
+    "equation_chunk",
+    "visual_asset_chunk",
+    "figure_caption_chunk",
+    "page_summary_chunk",
+    "layout_relation_chunk",
+    "parser_gap_chunk"
+  ]) {
+    assert.equal(storedUnitTypes.has(unitType), true, `missing ${unitType}`);
+  }
+  assert.equal(
+    storedChunks.some((chunk) => chunk.metadata?.["tableId"] === "table_revenue"),
+    true
+  );
+  assert.equal(
+    storedChunks.some((chunk) => chunk.metadata?.["visualAssetId"] === "figure_1"),
+    true
+  );
+  assert.equal(
+    storedChunks.some(
+      (chunk) =>
+        chunk.metadata?.["searchableUnitType"] === "equation_chunk" &&
+        chunk.text === "gross_margin = gross_profit / revenue"
+    ),
+    true
+  );
+  assert.equal(
+    storedChunks.some((chunk) =>
+      String(chunk.metadata?.["parserGapReasons"] ?? "").includes("page_text_below_threshold")
+    ),
+    true
+  );
 });
 
 test("resumes from document checkpoints without reindexing completed documents", async () => {

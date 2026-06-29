@@ -1,0 +1,14 @@
+{
+  "dataset_name": "docvqa",
+  "dataset_split": "fixture",
+  "data": [
+    {
+      "question_id": "tiny-docvqa-total",
+      "image": "tiny-page.png",
+      "document_text": "Invoice page\nTotal due: $42.50\nThank you.",
+      "expected_citation_page": 1,
+      "question": "What is the total due?",
+      "answers": ["$42.50"]
+    }
+  ]
+}

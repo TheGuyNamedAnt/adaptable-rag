@@ -99,6 +99,12 @@ class MockHostedVectorTransport {
     };
   }
 
+  vectorIdForChunk(chunkId: string): string {
+    const vector = this.vectors.find((stored) => stored.chunkId === chunkId);
+    assert.ok(vector);
+    return vector.id;
+  }
+
   forceNextMatch(vectorId: string, score: number): void {
     const vector = this.vectors.find((stored) => stored.id === vectorId);
     assert.ok(vector);
@@ -115,6 +121,12 @@ function hostedMatch(vector: ChunkVector, score: number) {
     namespaceId: vector.namespaceId,
     textHash: vector.textHash,
     embeddingModel: vector.embeddingModel,
+    ...(vector.embeddingProvider === undefined
+      ? {}
+      : { embeddingProvider: vector.embeddingProvider }),
+    ...(vector.embeddingConfigHash === undefined
+      ? {}
+      : { embeddingConfigHash: vector.embeddingConfigHash }),
     embeddedAt: vector.embeddedAt,
     dimensions: vector.dimensions,
     vector: vector.vector,
@@ -265,7 +277,7 @@ test("hosted vector store rejects stale remote metadata before returning a candi
   });
   const [firstChunk] = chunks;
   assert.ok(firstChunk);
-  transport.replaceVector(`fake-hashed-token-embedding_${firstChunk.id}`, {
+  transport.replaceVector(transport.vectorIdForChunk(firstChunk.id), {
     textHash: "wrong_hash"
   });
   const [queryEmbedding] = (
@@ -305,7 +317,7 @@ test("hosted vector store rejects cross-tenant matches even if the transport ret
   });
   const [firstChunk] = chunks;
   assert.ok(firstChunk);
-  const vectorId = `fake-hashed-token-embedding_${firstChunk.id}`;
+  const vectorId = transport.vectorIdForChunk(firstChunk.id);
   transport.replaceVector(vectorId, {
     tenantId: "tenant_2"
   });
@@ -324,6 +336,47 @@ test("hosted vector store rejects cross-tenant matches even if the transport ret
 
   assert.equal(result.candidates.length, 0);
   assert.equal(result.rejected[0]?.code, "access_denied_or_missing_chunk");
+});
+
+test("hosted vector store rejects remote matches missing required embedding config hash", async () => {
+  const { chunkIndex, chunks } = makeChunkIndex([makeDocument()]);
+  const [chunk] = chunks;
+  assert.ok(chunk);
+  const transport = new MockHostedVectorTransport();
+  const vectorStore = new HostedVectorStore({
+    chunkStore: chunkIndex,
+    transport,
+    dimensions: 3,
+    now: () => FIXED_NOW
+  });
+  await vectorStore.addChunkVectors([
+    {
+      id: "legacy_hosted_vector_without_hash",
+      chunkId: chunk.id,
+      documentId: chunk.documentId,
+      tenantId: chunk.accessScope.tenantId,
+      namespaceId: chunk.namespaceId,
+      textHash: chunk.textHash,
+      embeddingModel: "same-model",
+      dimensions: 3,
+      vector: [1, 0, 0],
+      embeddedAt: FIXED_NOW
+    }
+  ]);
+  transport.forceNextMatch("legacy_hosted_vector_without_hash", 1);
+
+  const result = await vectorStore.findNearestVectors({
+    vector: [1, 0, 0],
+    filter: makeIndexFilter(),
+    topK: 1,
+    embeddingModel: "same-model",
+    embeddingProvider: "provider",
+    embeddingConfigHash: "required-hash",
+    includeRejected: true
+  });
+
+  assert.equal(result.candidates.length, 0);
+  assert.equal(result.rejected[0]?.code, "embedding_identity_mismatch");
 });
 
 test("vector retriever can use an async hosted vector store", async () => {

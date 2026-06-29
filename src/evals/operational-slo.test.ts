@@ -102,6 +102,59 @@ test("RAG operational SLO keeps HTTP warning alerts non-blocking", () => {
   assert.equal(report.alerts[0]?.ruleId, "http_rate_limited");
 });
 
+test("RAG operational SLO warns on high HTTP latency", () => {
+  const report = buildRagOperationalSloReport({
+    generatedAt: GENERATED_AT,
+    httpMetrics: httpMetrics({
+      latencyMs: latencySummary({ p95: 45000, p99: 60000 })
+    })
+  });
+
+  assert.equal(report.status, "passed");
+  assert.equal(
+    report.alerts.some((alert) => alert.ruleId === "http_latency_p95"),
+    true
+  );
+});
+
+test("RAG operational SLO fails on low-citation answers", () => {
+  const report = buildRagOperationalSloReport({
+    generatedAt: GENERATED_AT,
+    httpMetrics: httpMetrics({
+      rag: ragMetrics({ lowCitationAnswerCount: 1, citationCount: 0 })
+    })
+  });
+
+  assert.equal(report.status, "failed");
+  assert.equal(
+    report.alerts.some((alert) => alert.ruleId === "rag_low_citation_answers"),
+    true
+  );
+});
+
+test("RAG operational SLO warns on no-evidence answers and model latency", () => {
+  const report = buildRagOperationalSloReport({
+    generatedAt: GENERATED_AT,
+    httpMetrics: httpMetrics({
+      rag: ragMetrics({
+        noEvidenceAnswerCount: 1,
+        byEvidenceStatus: { no_evidence: 1 },
+        modelLatencyMs: latencySummary({ p95: 45000, p99: 50000 })
+      })
+    })
+  });
+
+  assert.equal(report.status, "passed");
+  assert.equal(
+    report.alerts.some((alert) => alert.ruleId === "rag_no_evidence_answers"),
+    true
+  );
+  assert.equal(
+    report.alerts.some((alert) => alert.ruleId === "rag_model_latency_p95"),
+    true
+  );
+});
+
 function evalBenchmark(
   overrides: Partial<RagEvalBenchmarkSnapshot> = {}
 ): RagEvalBenchmarkSnapshot {
@@ -237,6 +290,9 @@ function httpMetrics(
     byStatusCode: { "200": 1 },
     byRoute: { answer: 1 },
     byOutcome: { answer_succeeded: 1 },
+    byAnswerStatus: { succeeded: 1 },
+    latencyMs: latencySummary(),
+    byRouteLatencyMs: { answer: latencySummary() },
     authDenied: 0,
     rateLimited: 0,
     answerSucceeded: 1,
@@ -244,6 +300,49 @@ function httpMetrics(
     answerFailed: 0,
     requestErrors: 0,
     serverErrors: 0,
+    rag: ragMetrics(),
+    ...overrides
+  };
+}
+
+function ragMetrics(
+  overrides: Partial<ProductionHttpMetricsSnapshot["rag"]> = {}
+): ProductionHttpMetricsSnapshot["rag"] {
+  return {
+    answerCount: 1,
+    retrievedChunkCount: 1,
+    rejectedRetrievalCount: 0,
+    citationCount: 1,
+    lowCitationAnswerCount: 0,
+    noEvidenceAnswerCount: 0,
+    humanReviewRequiredCount: 0,
+    byEvidenceStatus: { answerable: 1 },
+    byProfile: { "generic-docs": 1 },
+    byNamespace: { "generic-docs": 1 },
+    byTenantHash: { tenant_hash: 1 },
+    modelPromptTokens: 10,
+    modelCompletionTokens: 5,
+    modelTotalTokens: 15,
+    estimatedCostUsd: 0,
+    retrievalLatencyMs: latencySummary(),
+    contextLatencyMs: latencySummary(),
+    generationLatencyMs: latencySummary(),
+    modelLatencyMs: latencySummary(),
+    ...overrides
+  };
+}
+
+function latencySummary(
+  overrides: Partial<ProductionHttpMetricsSnapshot["latencyMs"]> = {}
+): ProductionHttpMetricsSnapshot["latencyMs"] {
+  return {
+    count: 1,
+    min: 10,
+    max: 10,
+    avg: 10,
+    p50: 10,
+    p95: 10,
+    p99: 10,
     ...overrides
   };
 }

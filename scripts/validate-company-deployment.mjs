@@ -1,10 +1,12 @@
 #!/usr/bin/env node
-import { mkdir, rename, writeFile } from "node:fs/promises";
+import { access, mkdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import {
   CompanyDeploymentRegistry,
+  resolveCompanyDeploymentAdapterPacks,
+  resolveCompanyDeploymentExport,
   runCompanyConnectorContractTests,
   runCompanyPackContractTests,
   validateCompanyDeployment
@@ -15,7 +17,13 @@ const options = parseArgs(process.argv.slice(2));
 try {
   const moduleUrl = resolveModuleUrl(options.modulePath);
   const moduleExports = await import(moduleUrl.href);
-  const deploymentInput = deploymentInputFromExport(moduleExports[options.exportName], options);
+  const deploymentInput = resolveCompanyDeploymentExport(moduleExports, {
+    modulePath: options.modulePath,
+    companyExportName: options.exportName,
+    ...(options.adapterPackExportNames.length === 0
+      ? {}
+      : { adapterPackExportNames: options.adapterPackExportNames })
+  });
   const company = deploymentInput.company;
 
   if (!company || typeof company !== "object") {
@@ -32,6 +40,8 @@ try {
     profileCount: report.profileCount,
     connectorCount: report.connectorCount,
     evalPackCount: report.evalPackCount,
+    deploymentPackage: safeDeploymentPackageSummary(deploymentInput),
+    manifestValidation: await validateDeploymentManifest(deploymentInput, options),
     errorCount: report.errors.length,
     warningCount: report.warnings.length,
     profiles: report.profiles.map((profile) => ({
@@ -47,6 +57,10 @@ try {
       message: safeText(issue.message)
     }))
   };
+
+  if (summary.manifestValidation.status === "failed") {
+    summary.status = "failed";
+  }
 
   if (report.ready && deploymentShouldValidatePacks(deploymentInput, options)) {
     summary.adapterPackValidation = validateDeploymentAdapterPacks({
@@ -147,7 +161,7 @@ try {
 function parseArgs(args) {
   const options = {
     modulePath: "dist/company/examples/acme-support.company.js",
-    exportName: "acmeSupportCompanyProfile",
+    exportName: "acmeSupportDeployment",
     adapterPackExportNames: [],
     contractUseCaseIds: [],
     contractModes: [],
@@ -156,6 +170,9 @@ function parseArgs(args) {
     requireFullComplete: true,
     requireSafeAccessBoundary: true,
     allowConnectorWarnings: true,
+    requireManifestEnv: false,
+    requireSmokeCommands: false,
+    manifestRoot: process.cwd(),
     principalNamespaceIds: [],
     principalTeamIds: [],
     principalRoles: [],
@@ -206,6 +223,15 @@ function parseArgs(args) {
         break;
       case "--disallow-connector-warnings":
         options.allowConnectorWarnings = false;
+        break;
+      case "--require-manifest-env":
+        options.requireManifestEnv = true;
+        break;
+      case "--require-smoke-commands":
+        options.requireSmokeCommands = true;
+        break;
+      case "--manifest-root":
+        options.manifestRoot = requiredValue(args, ++index, arg);
         break;
       case "--principal-user-id":
         options.principalUserId = requiredValue(args, ++index, arg);
@@ -408,48 +434,223 @@ async function runConnectorContractGate(input) {
   }
 }
 
-function deploymentInputFromExport(value, options) {
-  if (isDeploymentRegistration(value)) {
-    return {
-      company: value.company,
-      adapterPacks: Array.isArray(value.adapterPacks) ? value.adapterPacks : [],
-      deploymentExportName: options.exportName
-    };
-  }
-
-  return {
-    company: value,
-    adapterPacks: [],
-    deploymentExportName: undefined
-  };
-}
-
-function isDeploymentRegistration(value) {
-  return (
-    value !== undefined &&
-    value !== null &&
-    typeof value === "object" &&
-    "company" in value &&
-    value.company !== undefined
-  );
-}
-
 function adapterPacksForContracts(moduleExports, deploymentInput, options) {
-  if (options.adapterPackExportNames.length === 0 && deploymentInput.adapterPacks.length > 0) {
-    return {
-      adapterPacks: deploymentInput.adapterPacks,
-      exportNames:
-        deploymentInput.deploymentExportName === undefined
-          ? []
-          : [`${deploymentInput.deploymentExportName}.adapterPacks`]
-    };
-  }
-
-  return adapterPacksFromModule(moduleExports, options);
+  return resolveCompanyDeploymentAdapterPacks(moduleExports, {
+    selectedExportName: deploymentInput.moduleExportName,
+    ...(deploymentInput.deploymentManifest === undefined
+      ? {}
+      : { deploymentManifest: deploymentInput.deploymentManifest }),
+    ...(options.adapterPackExportNames.length === 0
+      ? {}
+      : { adapterPackExportNames: options.adapterPackExportNames }),
+    discoverAdapterPacks: true,
+    requireAdapterPacks: true
+  });
 }
 
 function deploymentShouldValidatePacks(deploymentInput, options) {
   return deploymentInput.adapterPacks.length > 0 || options.adapterPackExportNames.length > 0;
+}
+
+function safeDeploymentPackageSummary(deploymentInput) {
+  return {
+    exportName: deploymentInput.moduleExportName,
+    companyExportPath: deploymentInput.companyExportPath,
+    adapterPackExports: deploymentInput.adapterPackExportNames,
+    adapterPackCount: deploymentInput.adapterPacks.length,
+    ...(deploymentInput.environment === undefined
+      ? {}
+      : { environment: safeEnvironmentManifest(deploymentInput.environment) }),
+    ...(deploymentInput.evals === undefined
+      ? {}
+      : { evals: safeEvalManifest(deploymentInput.evals) }),
+    ...(deploymentInput.smoke === undefined
+      ? {}
+      : { smoke: safeSmokeManifest(deploymentInput.smoke) })
+  };
+}
+
+function safeEnvironmentManifest(environment) {
+  return {
+    requiredEnv: safeStringArray(environment.requiredEnv),
+    optionalEnv: safeStringArray(environment.optionalEnv)
+  };
+}
+
+function safeEvalManifest(evals) {
+  return {
+    requiredPaths: safeStringArray(evals.requiredPaths),
+    goldenSetPaths: safeStringArray(evals.goldenSetPaths),
+    adversarialSetPaths: safeStringArray(evals.adversarialSetPaths)
+  };
+}
+
+function safeSmokeManifest(smoke) {
+  return {
+    ...(smoke.validateCommand === undefined
+      ? {}
+      : { validateCommand: safeText(smoke.validateCommand) }),
+    ...(smoke.packContractsCommand === undefined
+      ? {}
+      : { packContractsCommand: safeText(smoke.packContractsCommand) }),
+    ...(smoke.smokeCommand === undefined ? {} : { smokeCommand: safeText(smoke.smokeCommand) }),
+    ...(smoke.postgresSmokeCommand === undefined
+      ? {}
+      : { postgresSmokeCommand: safeText(smoke.postgresSmokeCommand) })
+  };
+}
+
+function safeStringArray(values) {
+  return (values ?? []).map((value) => safeText(value));
+}
+
+async function validateDeploymentManifest(deploymentInput, options) {
+  if (deploymentInput.deploymentManifest === undefined) {
+    return {
+      status: "skipped",
+      reason: "Export is a legacy CompanyProfile, not a CompanyDeploymentManifest.",
+      errorCount: 0,
+      warningCount: 0,
+      checkedEnvCount: 0,
+      checkedEvalPathCount: 0,
+      checkedSmokeCommandCount: 0,
+      issues: []
+    };
+  }
+
+  const issues = [];
+  validateEnvironmentManifest(deploymentInput.environment, options, issues);
+  await validateEvalManifest(deploymentInput.evals, options, issues);
+  validateSmokeManifest(deploymentInput.smoke, options, issues);
+
+  const errorCount = issues.filter((issue) => issue.severity === "error").length;
+  const warningCount = issues.filter((issue) => issue.severity === "warning").length;
+  return {
+    status: errorCount === 0 ? "passed" : "failed",
+    errorCount,
+    warningCount,
+    checkedEnvCount: (deploymentInput.environment?.requiredEnv ?? []).length,
+    checkedEvalPathCount: (deploymentInput.evals?.requiredPaths ?? []).length,
+    checkedSmokeCommandCount: smokeCommands(deploymentInput.smoke).length,
+    issues
+  };
+}
+
+function validateEnvironmentManifest(environment, options, issues) {
+  for (const [kind, envNames] of [
+    ["requiredEnv", environment?.requiredEnv ?? []],
+    ["optionalEnv", environment?.optionalEnv ?? []]
+  ]) {
+    envNames.forEach((envName, index) => {
+      if (!isValidEnvName(envName)) {
+        issues.push({
+          severity: "error",
+          code: "invalid_env_name",
+          path: `environment.${kind}[${index}]`,
+          message: `Manifest env name "${safeText(envName)}" is not a safe environment variable name.`
+        });
+      }
+    });
+  }
+
+  if (options.requireManifestEnv) {
+    (environment?.requiredEnv ?? []).forEach((envName, index) => {
+      if (!process.env[envName]?.trim()) {
+        issues.push({
+          severity: "error",
+          code: "required_env_missing",
+          path: `environment.requiredEnv[${index}]`,
+          message: `Required manifest env "${safeText(envName)}" is not set.`
+        });
+      }
+    });
+  }
+}
+
+async function validateEvalManifest(evals, options, issues) {
+  for (const [index, filePath] of (evals?.requiredPaths ?? []).entries()) {
+    if (!isSafeRelativePath(filePath)) {
+      issues.push({
+        severity: "error",
+        code: "unsafe_eval_path",
+        path: `evals.requiredPaths[${index}]`,
+        message: `Required eval path "${safeText(filePath)}" must be a relative path inside the manifest root.`
+      });
+      continue;
+    }
+
+    const absolutePath = path.resolve(options.manifestRoot, filePath);
+    try {
+      await access(absolutePath);
+    } catch {
+      issues.push({
+        severity: "error",
+        code: "required_eval_path_missing",
+        path: `evals.requiredPaths[${index}]`,
+        message: `Required eval path "${safeText(filePath)}" was not found under manifest root.`
+      });
+    }
+  }
+}
+
+function validateSmokeManifest(smoke, options, issues) {
+  const commands = smokeCommands(smoke);
+  for (const command of commands) {
+    if (!command.value.trim()) {
+      issues.push({
+        severity: "error",
+        code: "empty_smoke_command",
+        path: `smoke.${command.key}`,
+        message: `Smoke command "${command.key}" is empty.`
+      });
+    }
+    if (/[\r\n]/u.test(command.value)) {
+      issues.push({
+        severity: "error",
+        code: "unsafe_smoke_command",
+        path: `smoke.${command.key}`,
+        message: `Smoke command "${command.key}" must be a single line.`
+      });
+    }
+  }
+
+  if (options.requireSmokeCommands) {
+    for (const key of ["validateCommand", "smokeCommand", "postgresSmokeCommand"]) {
+      if (!smoke?.[key]?.trim()) {
+        issues.push({
+          severity: "error",
+          code: "required_smoke_command_missing",
+          path: `smoke.${key}`,
+          message: `Required smoke command "${key}" is missing.`
+        });
+      }
+    }
+  }
+}
+
+function smokeCommands(smoke) {
+  if (smoke === undefined) {
+    return [];
+  }
+  return ["validateCommand", "packContractsCommand", "smokeCommand", "postgresSmokeCommand"]
+    .filter((key) => smoke[key] !== undefined)
+    .map((key) => ({
+      key,
+      value: String(smoke[key])
+    }));
+}
+
+function isValidEnvName(value) {
+  return /^[A-Z_][A-Z0-9_]*$/u.test(value);
+}
+
+function isSafeRelativePath(value) {
+  return (
+    typeof value === "string" &&
+    value.trim().length > 0 &&
+    !path.isAbsolute(value) &&
+    !value.split(/[\\/]+/u).includes("..")
+  );
 }
 
 function validateDeploymentAdapterPacks(input) {
@@ -483,63 +684,6 @@ function validateDeploymentAdapterPacks(input) {
       error: safeError(error)
     };
   }
-}
-
-function adapterPacksFromModule(moduleExports, options) {
-  const explicitExportNames = options.adapterPackExportNames.length > 0;
-  const exportNames = explicitExportNames
-    ? options.adapterPackExportNames
-    : defaultAdapterPackExportNames(options.exportName);
-  const adapterPacks = [];
-  const foundExportNames = [];
-
-  for (const exportName of exportNames) {
-    if (!Object.hasOwn(moduleExports, exportName)) {
-      if (explicitExportNames) {
-        throw new Error(`Adapter pack export "${exportName}" was not found.`);
-      }
-      continue;
-    }
-
-    const value = moduleExports[exportName];
-    if (value === undefined || value === null) {
-      throw new Error(`Adapter pack export "${exportName}" is empty.`);
-    }
-    adapterPacks.push(...(Array.isArray(value) ? value : [value]));
-    foundExportNames.push(exportName);
-    if (!explicitExportNames) {
-      break;
-    }
-  }
-
-  if (adapterPacks.length === 0) {
-    throw new Error(
-      "Connector contract validation requires at least one adapter pack export. Pass --adapter-pack-export."
-    );
-  }
-
-  return {
-    adapterPacks,
-    exportNames: foundExportNames
-  };
-}
-
-function defaultAdapterPackExportNames(companyExportName) {
-  const companyPrefix = companyExportName.replace(/CompanyProfile$/u, "");
-  const candidateNames = [
-    "adapterPack",
-    "adapterPacks",
-    "companyAdapterPack",
-    "companyAdapterPacks",
-    `${companyPrefix}AdapterPack`,
-    `${companyPrefix}AdapterPacks`,
-    `${companyExportName}AdapterPack`,
-    `${companyExportName}AdapterPacks`
-  ];
-
-  return [
-    ...new Set(candidateNames.filter((name) => name !== "AdapterPack" && name !== "AdapterPacks"))
-  ];
 }
 
 function principalForUseCase(company, useCase, options) {

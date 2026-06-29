@@ -31,6 +31,7 @@ import type {
   IndexSnapshot,
   IndexStats
 } from "./index-types.js";
+import { POSTGRES_INDEX_SCALE_CAPABILITIES } from "./scale-capabilities.js";
 import { validateChunksForIndex, validateDocumentForIndex } from "./index-validation.js";
 
 export interface PostgresRagIndexOptions {
@@ -65,7 +66,8 @@ export class PostgresRagIndex implements DocumentStore, ChunkStore, FtsIndexStor
     enforcesAccessFilters: true,
     supportsKeywordScan: false,
     supportsVectorSearch: true,
-    supportsHybridSearch: true
+    supportsHybridSearch: true,
+    scale: POSTGRES_INDEX_SCALE_CAPABILITIES
   };
 
   private readonly pool: Pool;
@@ -857,10 +859,10 @@ function chunkMatchesFilter(chunk: RagChunk, filter: IndexFilter): boolean {
 
 function arrayPredicate(
   column: string,
-  values: readonly string[] | undefined,
+  _values: readonly string[] | undefined,
   index: number
 ): string {
-  return values === undefined ? "" : `and ${column} = any($${index}::text[])`;
+  return `and ($${index}::text[] is null or ${column} = any($${index}::text[]))`;
 }
 
 function applyLimit<T>(values: readonly T[], limit: number | undefined): readonly T[] {

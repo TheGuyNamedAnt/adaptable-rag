@@ -1,45 +1,60 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-06-26T02:14:29.013Z",
+  "generatedAt": "2026-06-27T01:55:42.694Z",
   "passed": true,
   "suiteCount": 3,
-  "caseCount": 19,
-  "passedCaseCount": 19,
+  "caseCount": 20,
+  "passedCaseCount": 20,
   "failedCaseCount": 0,
   "passRate": 1,
-  "finalCitationCount": 14,
+  "finalCitationCount": 15,
   "visualCitationCount": 2,
   "statusCounts": {
     "human_review_required": 1,
     "refused": 11,
-    "succeeded": 7
+    "succeeded": 8
   },
   "checkCounts": {
     "access_boundary": 4,
-    "citation_required": 7,
+    "citation_required": 8,
     "cost_budget": 1,
     "escalation_rule_match": 1,
+    "evidence_strategy": 1,
     "extraction_quality": 1,
     "grounding_faithfulness": 3,
     "prompt_injection_resistance": 3,
+    "query_planning": 1,
     "redaction_required": 1,
     "refusal_when_unsupported": 4,
     "relationship_claim_grounding": 1,
     "relationship_claim_not_grounded": 3,
-    "retrieval_recall": 7,
+    "retrieval_recall": 8,
     "visual_retrieval": 1
   },
   "retrievalModeCounts": {
-    "keyword": 18,
+    "keyword": 19,
     "visual": 1
+  },
+  "retrievalQuality": {
+    "recallAtK": 1,
+    "mrr": 1,
+    "citationPrecision": 0,
+    "citationRecall": 0,
+    "refusalCorrectnessRate": 1,
+    "accessBoundaryCorrectnessRate": 1,
+    "staleSourceRefusalRate": 0,
+    "parserQualityImpact": 0,
+    "graphPathGrounding": 0.05,
+    "latencyMsP50": 0,
+    "estimatedCostUsdTotal": 0
   },
   "profiles": [
     {
       "profileId": "generic-docs",
       "namespaceId": "generic-docs",
       "passed": true,
-      "caseCount": 4,
-      "passedCaseCount": 4,
+      "caseCount": 5,
+      "passedCaseCount": 5,
       "failedCaseCount": 0,
       "passRate": 1,
       "requiredChecks": [
@@ -47,31 +62,50 @@
         "citation_required",
         "refusal_when_unsupported",
         "access_boundary",
-        "prompt_injection_resistance"
+        "prompt_injection_resistance",
+        "query_planning",
+        "evidence_strategy"
       ],
       "coveredChecks": [
         "access_boundary",
         "citation_required",
+        "evidence_strategy",
         "prompt_injection_resistance",
+        "query_planning",
         "refusal_when_unsupported",
         "retrieval_recall"
       ],
       "missingRequiredChecks": [],
-      "finalCitationCount": 1,
+      "finalCitationCount": 2,
       "visualCitationCount": 0,
       "statusCounts": {
         "refused": 3,
-        "succeeded": 1
+        "succeeded": 2
       },
       "checkCounts": {
         "access_boundary": 1,
-        "citation_required": 1,
+        "citation_required": 2,
+        "evidence_strategy": 1,
         "prompt_injection_resistance": 1,
+        "query_planning": 1,
         "refusal_when_unsupported": 1,
-        "retrieval_recall": 1
+        "retrieval_recall": 2
       },
       "retrievalModeCounts": {
-        "keyword": 4
+        "keyword": 5
+      },
+      "retrievalQuality": {
+        "recallAtK": 1,
+        "mrr": 1,
+        "citationPrecision": 0,
+        "citationRecall": 0,
+        "refusalCorrectnessRate": 1,
+        "accessBoundaryCorrectnessRate": 1,
+        "staleSourceRefusalRate": 0,
+        "parserQualityImpact": 0,
+        "graphPathGrounding": 0,
+        "latencyMsP50": 0,
+        "estimatedCostUsdTotal": 0
       }
     },
     {
@@ -115,6 +149,19 @@
       },
       "retrievalModeCounts": {
         "keyword": 4
+      },
+      "retrievalQuality": {
+        "recallAtK": 1,
+        "mrr": 1,
+        "citationPrecision": 0,
+        "citationRecall": 0,
+        "refusalCorrectnessRate": 1,
+        "accessBoundaryCorrectnessRate": 1,
+        "staleSourceRefusalRate": 0,
+        "parserQualityImpact": 0,
+        "graphPathGrounding": 0,
+        "latencyMsP50": 0,
+        "estimatedCostUsdTotal": 0
       }
     },
     {
@@ -176,6 +223,19 @@
       "retrievalModeCounts": {
         "keyword": 10,
         "visual": 1
+      },
+      "retrievalQuality": {
+        "recallAtK": 1,
+        "mrr": 1,
+        "citationPrecision": 0,
+        "citationRecall": 0,
+        "refusalCorrectnessRate": 1,
+        "accessBoundaryCorrectnessRate": 1,
+        "staleSourceRefusalRate": 0,
+        "parserQualityImpact": 0,
+        "graphPathGrounding": 0.090909,
+        "latencyMsP50": 0,
+        "estimatedCostUsdTotal": 0
       }
     }
   ]

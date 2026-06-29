@@ -2,6 +2,7 @@ import type { RagChunk } from "../documents/chunk.js";
 import { isValidIndexFilter } from "./index-filter.js";
 import type { ChunkStore } from "./chunk-store.js";
 import type { IndexFilter, IndexOperationResult } from "./index-types.js";
+import { HOSTED_VECTOR_SCALE_CAPABILITIES } from "./scale-capabilities.js";
 import {
   type ChunkVector,
   type VectorIndexOptions,
@@ -52,6 +53,9 @@ export interface HostedVectorQueryRequest {
   readonly tenantId: string;
   readonly namespaceId: string;
   readonly topK: number;
+  readonly embeddingModel?: string;
+  readonly embeddingProvider?: string;
+  readonly embeddingConfigHash?: string;
   readonly candidatePoolLimit?: number;
   readonly minScore?: number;
 }
@@ -68,6 +72,8 @@ export interface HostedVectorSearchMatch {
   readonly namespaceId: string;
   readonly textHash: string;
   readonly embeddingModel: string;
+  readonly embeddingProvider?: string;
+  readonly embeddingConfigHash?: string;
   readonly embeddedAt: string;
   readonly dimensions: number;
   readonly vector: readonly number[];
@@ -101,6 +107,7 @@ export class HostedVectorStore implements VectorStore {
       durable: true,
       enforcesAccessFilters: true,
       supportsCosineSimilarity: true,
+      scale: HOSTED_VECTOR_SCALE_CAPABILITIES,
       ...(options.dimensions === undefined ? {} : { dimensions: options.dimensions })
     };
 
@@ -161,6 +168,13 @@ export class HostedVectorStore implements VectorStore {
       tenantId: request.filter.tenantId,
       namespaceId: request.filter.namespaceId,
       topK: request.candidatePoolLimit ?? request.topK,
+      ...(request.embeddingModel === undefined ? {} : { embeddingModel: request.embeddingModel }),
+      ...(request.embeddingProvider === undefined
+        ? {}
+        : { embeddingProvider: request.embeddingProvider }),
+      ...(request.embeddingConfigHash === undefined
+        ? {}
+        : { embeddingConfigHash: request.embeddingConfigHash }),
       ...(request.candidatePoolLimit === undefined
         ? {}
         : { candidatePoolLimit: request.candidatePoolLimit }),
@@ -242,6 +256,7 @@ async function evaluateHostedMatch(input: {
 
   const metadataRejection = validateMatchAgainstChunk({
     match: input.match,
+    request: input.request,
     chunk,
     filter: input.request.filter,
     expectedDimensions: input.expectedDimensions,
@@ -262,6 +277,12 @@ async function evaluateHostedMatch(input: {
         namespaceId: input.match.namespaceId,
         textHash: input.match.textHash,
         embeddingModel: input.match.embeddingModel,
+        ...(input.match.embeddingProvider === undefined
+          ? {}
+          : { embeddingProvider: input.match.embeddingProvider }),
+        ...(input.match.embeddingConfigHash === undefined
+          ? {}
+          : { embeddingConfigHash: input.match.embeddingConfigHash }),
         dimensions: input.match.dimensions,
         vector: input.match.vector,
         embeddedAt: input.match.embeddedAt
@@ -333,6 +354,7 @@ function validateHostedMatch(
 
 function validateMatchAgainstChunk(input: {
   readonly match: HostedVectorSearchMatch;
+  readonly request: VectorSearchRequest;
   readonly chunk: RagChunk;
   readonly filter: IndexFilter;
   readonly expectedDimensions: number | undefined;
@@ -370,6 +392,40 @@ function validateMatchAgainstChunk(input: {
       chunkId: input.match.chunkId,
       code: "vector_dimension_mismatch",
       reason: "Hosted vector match dimensions do not match the configured store dimensions."
+    };
+  }
+
+  if (
+    input.request.embeddingModel !== undefined &&
+    input.match.embeddingModel !== input.request.embeddingModel
+  ) {
+    return {
+      chunkId: input.match.chunkId,
+      code: "embedding_identity_mismatch",
+      reason: "Hosted vector match embedding model does not match the query embedding model."
+    };
+  }
+
+  if (
+    input.request.embeddingProvider !== undefined &&
+    input.match.embeddingProvider !== input.request.embeddingProvider
+  ) {
+    return {
+      chunkId: input.match.chunkId,
+      code: "embedding_identity_mismatch",
+      reason: "Hosted vector match embedding provider does not match the query embedding provider."
+    };
+  }
+
+  if (
+    input.request.embeddingConfigHash !== undefined &&
+    input.match.embeddingConfigHash !== input.request.embeddingConfigHash
+  ) {
+    return {
+      chunkId: input.match.chunkId,
+      code: "embedding_identity_mismatch",
+      reason:
+        "Hosted vector match embedding config hash does not match the query embedding config hash."
     };
   }
 

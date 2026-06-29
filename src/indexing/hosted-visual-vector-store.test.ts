@@ -116,6 +116,15 @@ class MockHostedVisualVectorTransport {
     };
   }
 
+  deleteVectorIdentity(vectorId: string): void {
+    const index = this.vectors.findIndex((vector) => vector.id === vectorId);
+    assert.notEqual(index, -1);
+    const existing = this.vectors[index];
+    assert.ok(existing);
+    const { embeddingProvider: _provider, embeddingConfigHash: _hash, ...rest } = existing;
+    this.vectors[index] = rest;
+  }
+
   forceNextMatches(matches: readonly HostedVectorSearchMatch[]): void {
     this.forcedMatches = matches;
   }
@@ -156,6 +165,14 @@ test("hosted visual vector store indexes patch vectors and returns visual record
     indexed.every((entry) => entry.accepted),
     true
   );
+  assert.equal(
+    transport.vectors.every(
+      (vector) =>
+        vector.embeddingProvider === "test-visual-provider" &&
+        vector.embeddingConfigHash === "test-visual-config"
+    ),
+    true
+  );
   assert.equal(transport.vectors.length > chunks.length, true);
   assert.equal(await store.visualVectorCount(), transport.vectors.length);
   assert.equal(result.candidates.length, 1);
@@ -184,12 +201,18 @@ test("hosted visual query does not send principal claims to the remote transport
   await store.findNearestVisualVectors({
     vectors: visualVectorsForText("refund", 8),
     filter: makeIndexFilter(),
-    topK: 1
+    topK: 1,
+    embeddingModel: "test-visual",
+    embeddingProvider: "test-visual-provider",
+    embeddingConfigHash: "test-visual-config"
   });
 
   assert.equal(transport.queryRequests.length, visualVectorsForText("refund", 8).length);
   const serializedRemoteRequest = JSON.stringify(transport.queryRequests[0]);
   assert.equal(serializedRemoteRequest.includes("tenant_1"), true);
+  assert.equal(serializedRemoteRequest.includes("test-visual"), true);
+  assert.equal(serializedRemoteRequest.includes("test-visual-provider"), true);
+  assert.equal(serializedRemoteRequest.includes("test-visual-config"), true);
   assert.equal(serializedRemoteRequest.includes("user_1"), false);
   assert.equal(serializedRemoteRequest.includes("support_team"), false);
   assert.equal(serializedRemoteRequest.includes("roles"), false);
@@ -270,6 +293,36 @@ test("hosted visual vector store rejects stale and cross-tenant remote metadata"
 
   assert.equal(crossTenant.candidates.length, 0);
   assert.equal(crossTenant.rejected[0]?.code, "access_denied_or_missing_chunk");
+});
+
+test("hosted visual vector store rejects remote patches missing required embedding config hash", async () => {
+  const { chunkIndex, chunks } = makeChunkIndex([makeDocument()]);
+  const [chunk] = chunks;
+  assert.ok(chunk);
+  const transport = new MockHostedVisualVectorTransport();
+  const store = new HostedVisualVectorStore({
+    chunkStore: chunkIndex,
+    transport,
+    dimensions: 3,
+    now: () => FIXED_NOW
+  });
+  await store.addVisualChunkVectors([vectorForChunk(chunk, 3)]);
+  const patchId = patchVectorId(`visual_${chunk.id}`, 0);
+  transport.deleteVectorIdentity(patchId);
+  transport.forceNextMatches([hostedVisualMatch(requiredVector(transport, patchId), 1)]);
+
+  const result = await store.findNearestVisualVectors({
+    vectors: [visualVectorsForText(chunk.text, 3)[0] ?? []],
+    filter: makeIndexFilter(),
+    topK: 1,
+    embeddingModel: "test-visual",
+    embeddingProvider: "test-visual-provider",
+    embeddingConfigHash: "test-visual-config",
+    includeRejected: true
+  });
+
+  assert.equal(result.candidates.length, 0);
+  assert.equal(result.rejected[0]?.code, "embedding_identity_mismatch");
 });
 
 test("hosted visual vector store rejects malformed visual patch metadata", async () => {
@@ -518,6 +571,12 @@ function hostedVisualMatch(vector: ChunkVector, score: number): HostedVectorSear
     namespaceId: vector.namespaceId,
     textHash: vector.textHash,
     embeddingModel: vector.embeddingModel,
+    ...(vector.embeddingProvider === undefined
+      ? {}
+      : { embeddingProvider: vector.embeddingProvider }),
+    ...(vector.embeddingConfigHash === undefined
+      ? {}
+      : { embeddingConfigHash: vector.embeddingConfigHash }),
     embeddedAt: vector.embeddedAt,
     dimensions: vector.dimensions,
     vector: vector.vector,
@@ -536,6 +595,8 @@ function vectorForChunk(chunk: RagChunk, dimensions: number): VisualChunkVector 
     namespaceId: chunk.namespaceId,
     textHash: chunk.textHash,
     embeddingModel: "test-visual",
+    embeddingProvider: "test-visual-provider",
+    embeddingConfigHash: "test-visual-config",
     dimensions,
     vectors: visualVectorsForText(chunk.text, dimensions),
     embeddedAt: FIXED_NOW,

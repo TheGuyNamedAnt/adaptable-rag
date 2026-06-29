@@ -7,6 +7,7 @@ import type { IndexFilter } from "../indexing/index-types.js";
 import type { RagRunStatus } from "../observability/trace.js";
 import type { RagRunTrace } from "../observability/trace.js";
 import type { RetrievalMode } from "../retrieval/retrieval-types.js";
+import type { AdaptiveRetrievalStrategy } from "../retrieval/retrieval-types.js";
 import type {
   LocalEvalKnowledgeMapEntityFixture,
   LocalEvalKnowledgeMapFixture,
@@ -29,12 +30,35 @@ export const RUNTIME_EVAL_CHECKS = [
   "table_caption_preservation",
   "relationship_claim_grounding",
   "relationship_claim_not_grounded",
-  "extraction_quality"
+  "extraction_quality",
+  "query_planning",
+  "evidence_strategy"
 ] as const;
 
 export type RuntimeEvalCheck = (typeof RUNTIME_EVAL_CHECKS)[number];
 export type RagEvalCheck = RuntimeEvalCheck | string;
 export type EvalRetrievalMode = "profile" | "keyword" | "visual";
+export type EvalQueryIntentKind =
+  | "general"
+  | "definition"
+  | "troubleshooting"
+  | "comparison"
+  | "policy"
+  | "relationship"
+  | "freshness"
+  | "table"
+  | "visual"
+  | "procedural";
+export type EvalQuerySourceHint =
+  | "docs"
+  | "support"
+  | "tickets"
+  | "incidents"
+  | "tables"
+  | "visuals"
+  | "graph"
+  | "recent";
+export type EvalGraphQueryRoute = "none" | "graph_optional" | "graph_required";
 
 export type EvalIndexFilterOverrides = Partial<
   Pick<
@@ -70,6 +94,14 @@ export interface RagEvalExpectation {
   readonly requiredRelationshipPaths?: readonly RagEvalRelationshipPathExpectation[];
   readonly forbiddenRelationshipPaths?: readonly RagEvalRelationshipPathExpectation[];
   readonly staleSourceRefusalExpected?: boolean;
+  readonly requiredPrimaryIntent?: EvalQueryIntentKind;
+  readonly requiredSecondaryIntents?: readonly EvalQueryIntentKind[];
+  readonly requiredSourceHints?: readonly EvalQuerySourceHint[];
+  readonly requiredGraphRoute?: EvalGraphQueryRoute;
+  readonly requiredAdaptiveRetryStrategy?: AdaptiveRetrievalStrategy;
+  readonly requiredAdaptiveDiagnosisCode?: string;
+  readonly requiredFreshnessTraceApplied?: boolean;
+  readonly minimumFreshnessBoostedCandidates?: number;
 }
 
 export interface RagEvalRelationshipPathExpectation {

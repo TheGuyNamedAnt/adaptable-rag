@@ -12,6 +12,7 @@ import {
 import type { CorpusNormalizationIssue } from "../corpus/normalize.js";
 import {
   LOCAL_FILES_ADAPTER_ID,
+  MAX_LOCAL_FILES_PARSER_CONCURRENCY,
   LocalFilesCorpusAdapter,
   type LocalFilesAccessScopeConfig,
   type LocalFilesSourceConfig
@@ -37,6 +38,11 @@ import {
   type IngestPipelineResumeState,
   type IngestPipelineResult
 } from "../ingestion/ingest-pipeline.js";
+import {
+  buildIngestionIntegrityReport,
+  type IngestionIntegrityPostIngestMetrics,
+  type IngestionIntegrityReport
+} from "../ingestion/ingestion-integrity.js";
 import type { IndexOperationResult, IndexOverwriteMode } from "../indexing/index-types.js";
 import {
   PostgresIngestionCheckpointStore,
@@ -155,6 +161,7 @@ export interface ProductionRagIngestResponse {
   readonly vector?: ProductionRagIngestVectorSummary;
   readonly visualVector?: ProductionRagIngestVisualVectorSummary;
   readonly parserQuality: ParserQualitySummary;
+  readonly integrity: IngestionIntegrityReport;
   readonly warnings: ProductionRagIngestWarnings;
   readonly artifacts: ProductionRagIngestArtifacts;
 }
@@ -173,7 +180,10 @@ export interface ProductionRagIngestCounts {
   readonly adapterWarnings: number;
   readonly normalizationIssues: number;
   readonly parserQualityWarnings: number;
+  readonly searchableArtifactWarnings: number;
   readonly chunkingWarnings: number;
+  readonly integrityErrors: number;
+  readonly integrityWarnings: number;
 }
 
 export type ProductionRagIngestVectorSummary =
@@ -222,6 +232,7 @@ export interface ProductionRagIngestWarnings {
   readonly adapter: readonly CorpusAdapterWarning[];
   readonly normalization: readonly CorpusNormalizationIssue[];
   readonly parserQuality: readonly ParserQualityWarning[];
+  readonly searchableArtifacts: NonNullable<IngestPipelineResult["searchableArtifactWarnings"]>;
   readonly chunking: readonly ChunkingWarning[];
   readonly index: readonly ProductionRagIngestIndexWarning[];
   readonly embedding: readonly ProductionRagIngestEmbeddingWarning[];
@@ -488,6 +499,32 @@ export class IngestionJobRunner implements ProductionIngestRuntime {
         },
         ...(request.requestedAt === undefined ? {} : { requestedAt: request.requestedAt })
       });
+      for (const document of ingestResult.documents) {
+        await progressStore?.updateDocument({
+          jobId,
+          sourceId: document.provenance.sourceId,
+          documentId: document.id,
+          status: "accepted",
+          chunkCount: ingestResult.chunks.filter((chunk) => chunk.documentId === document.id)
+            .length,
+          finishedAt: now(),
+          updatedAt: now()
+        });
+      }
+      for (const rejected of ingestResult.rejectedRecords) {
+        await progressStore?.updateDocument({
+          jobId,
+          sourceId: rejected.sourceId,
+          documentId: rejected.recordId,
+          status: "failed",
+          retryable: false,
+          failureStage: rejected.rejectedStage,
+          failurePhase: `${rejected.rejectedStage}_rejected_record`,
+          finishedAt: now(),
+          updatedAt: now(),
+          errorMessage: rejected.reason
+        });
+      }
       await jobStore?.update({
         jobId,
         status: "embedding",
@@ -624,7 +661,10 @@ function ingestCompletedStatus(
     summary.counts.adapterWarnings +
     summary.counts.normalizationIssues +
     summary.counts.parserQualityWarnings +
+    summary.counts.searchableArtifactWarnings +
     summary.counts.chunkingWarnings +
+    summary.counts.integrityErrors +
+    summary.counts.integrityWarnings +
     summary.counts.indexWritesRejected +
     (summary.vector?.status === "indexed" ? summary.vector.warningCount : 0) +
     (summary.visualVector?.status === "indexed" ? summary.visualVector.warningCount : 0);
@@ -1057,6 +1097,13 @@ async function maybeIndexEmbeddings(input: {
     };
   }
 
+  if (input.overwriteMode === "replace") {
+    await deleteVectorsForDocuments(
+      input.app.vectorStore,
+      input.ingestResult.documents.map((document) => document.id)
+    );
+  }
+
   const result = await new BatchEmbeddingIndexer({
     adapter: embeddingAdapter,
     vectorStore: input.app.vectorStore,
@@ -1137,6 +1184,13 @@ async function maybeIndexVisualEmbeddings(input: {
     };
   }
 
+  if (input.overwriteMode === "replace") {
+    await deleteVisualVectorsForDocuments(
+      input.app.visualVectorStore,
+      input.ingestResult.documents.map((document) => document.id)
+    );
+  }
+
   const indexer = new VisualEmbeddingIndexer({
     adapter: visualEmbeddingAdapter,
     visualVectorStore: input.app.visualVectorStore,
@@ -1191,6 +1245,10 @@ async function summarizeIngestResult(
 ): Promise<ProductionRagIngestResponse> {
   const indexStats = await app.chunkStore.stats();
   const rejectedIndexResults = result.indexResults.filter((indexResult) => !indexResult.accepted);
+  const integrity = buildIngestionIntegrityReport({
+    ingest: result,
+    postIngest: integrityPostIngestMetrics(embedding, visualEmbedding)
+  });
 
   const response: Omit<ProductionRagIngestResponse, "artifacts"> = {
     status: "completed",
@@ -1207,7 +1265,10 @@ async function summarizeIngestResult(
       adapterWarnings: result.adapterWarnings.length,
       normalizationIssues: result.normalizationIssues.length,
       parserQualityWarnings: result.parserQualityWarnings.length,
-      chunkingWarnings: result.chunkingWarnings.length
+      searchableArtifactWarnings: result.searchableArtifactWarnings?.length ?? 0,
+      chunkingWarnings: result.chunkingWarnings.length,
+      integrityErrors: integrity.errorCount,
+      integrityWarnings: integrity.warningCount
     },
     index: {
       storageKind: app.chunkStore.capabilities.storageKind,
@@ -1218,10 +1279,12 @@ async function summarizeIngestResult(
     vector: embedding.vector,
     visualVector: visualEmbedding.visualVector,
     parserQuality: result.parserQuality,
+    integrity,
     warnings: {
       adapter: result.adapterWarnings,
       normalization: result.normalizationIssues,
       parserQuality: result.parserQualityWarnings,
+      searchableArtifacts: result.searchableArtifactWarnings ?? [],
       chunking: result.chunkingWarnings,
       index: rejectedIndexResults.map(redactIndexWarning),
       embedding: embedding.warnings,
@@ -1240,6 +1303,26 @@ async function summarizeIngestResult(
   return response as ProductionRagIngestResponse;
 }
 
+function integrityPostIngestMetrics(
+  embedding: EmbeddingIndexSummary,
+  visualEmbedding: VisualEmbeddingIndexSummary
+): IngestionIntegrityPostIngestMetrics {
+  return {
+    indexedVectorCount:
+      embedding.vector.status === "indexed" ? embedding.vector.indexedVectorCount : 0,
+    indexedRelationVectorCount:
+      embedding.vector.status === "indexed" ? embedding.vector.indexedRelationVectorCount : 0,
+    candidateRelationCount:
+      embedding.vector.status === "indexed" ? embedding.vector.candidateRelationCount : 0,
+    indexedVisualVectorCount:
+      visualEmbedding.visualVector.status === "indexed"
+        ? visualEmbedding.visualVector.indexedVisualVectorCount
+        : 0,
+    knowledgeEntityCount: 0,
+    knowledgeRelationCount: 0
+  };
+}
+
 function redactIndexWarning(result: IndexOperationResult): ProductionRagIngestIndexWarning {
   return {
     id: result.id,
@@ -1253,6 +1336,24 @@ async function vectorCountFor(vectorStore: VectorStore): Promise<number> {
 
 async function visualVectorCountFor(visualVectorStore: VisualVectorStore): Promise<number> {
   return await visualVectorStore.visualVectorCount();
+}
+
+async function deleteVectorsForDocuments(
+  vectorStore: VectorStore,
+  documentIds: readonly string[]
+): Promise<void> {
+  for (const documentId of new Set(documentIds)) {
+    await vectorStore.deleteVectorsForDocument(documentId);
+  }
+}
+
+async function deleteVisualVectorsForDocuments(
+  visualVectorStore: VisualVectorStore,
+  documentIds: readonly string[]
+): Promise<void> {
+  for (const documentId of new Set(documentIds)) {
+    await visualVectorStore.deleteVisualVectorsForDocument(documentId);
+  }
 }
 
 function parseLocalFilesSourcesPayload(
@@ -1596,6 +1697,10 @@ function parseLocalFilesSourceConfig(
     record["parserRequireLayout"],
     `${label}.parserRequireLayout`
   );
+  const parserConcurrency = optionalParserConcurrency(
+    record["parserConcurrency"],
+    `${label}.parserConcurrency`
+  );
   const sourceKind = optionalSourceKind(record["sourceKind"], `${label}.sourceKind`);
   const trustTier = optionalTrustTier(record["trustTier"], `${label}.trustTier`);
   const sensitivity = optionalSourceSensitivity(record["sensitivity"], `${label}.sensitivity`);
@@ -1618,6 +1723,7 @@ function parseLocalFilesSourceConfig(
     ...(parserMode === undefined ? {} : { parserMode }),
     ...(parserId === undefined ? {} : { parserId }),
     ...(parserRequireLayout === undefined ? {} : { parserRequireLayout }),
+    ...(parserConcurrency === undefined ? {} : { parserConcurrency }),
     ...(sourceKind === undefined ? {} : { sourceKind }),
     ...(trustTier === undefined ? {} : { trustTier }),
     ...(sensitivity === undefined ? {} : { sensitivity }),
@@ -1867,6 +1973,21 @@ function optionalPositiveInteger(value: unknown, label: string): number | undefi
   }
 
   return value;
+}
+
+function optionalParserConcurrency(value: unknown, label: string): number | undefined {
+  const concurrency = optionalPositiveInteger(value, label);
+  if (concurrency === undefined) {
+    return undefined;
+  }
+
+  if (concurrency > MAX_LOCAL_FILES_PARSER_CONCURRENCY) {
+    throw new ProductionRagConfigError(
+      `${label} must be <= ${MAX_LOCAL_FILES_PARSER_CONCURRENCY}.`
+    );
+  }
+
+  return concurrency;
 }
 
 function requiredBoolean(value: unknown, label: string): boolean {

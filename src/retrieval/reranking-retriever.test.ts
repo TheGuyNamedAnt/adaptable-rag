@@ -150,6 +150,212 @@ test("lightweight reranking reorders candidates without leaking raw query or tex
   assert.equal(JSON.stringify(result.rerank).includes("Refund billing policy"), false);
 });
 
+test("lightweight reranking boosts precise citation evidence", async () => {
+  const generic = firstChunk(
+    makeDocument({
+      id: "doc_generic",
+      body: "Refund billing policy requires support review."
+    })
+  );
+  const cited = withCitationEvidence(
+    firstChunk(
+      makeDocument({
+        id: "doc_cited",
+        body: "Refund billing policy requires support review."
+      })
+    )
+  );
+  const child = new StaticRetriever([
+    candidate(generic, 0.5, 1, ["keyword_term_match"]),
+    candidate(cited, 0.5, 1, ["keyword_term_match"])
+  ]);
+  const retriever = new RerankingRetriever({
+    profile,
+    retriever: child,
+    reranker: new LightweightReranker({ now: () => FIXED_NOW }),
+    now: () => FIXED_NOW
+  });
+
+  const result = await retriever.retrieve({
+    query: "refund billing",
+    mode: "keyword",
+    filter: makeIndexFilter(),
+    topK: 1,
+    retrievalId: "lightweight_citation_quality_test",
+    requestedAt: FIXED_NOW
+  });
+
+  assert.equal(result.candidates[0]?.chunk.documentId, "doc_cited");
+  assert.equal(result.candidates[0]?.reasons.includes("lightweight_citation_quality"), true);
+});
+
+test("lightweight reranking routes table questions toward table-derived chunks", async () => {
+  const generic = firstChunk(
+    makeDocument({
+      id: "doc_table_generic",
+      body: "North America revenue 120 appears in the appendix."
+    })
+  );
+  const table = withSearchableUnit(
+    firstChunk(
+      makeDocument({
+        id: "doc_table_row",
+        body: "North America revenue 120 appears in the appendix."
+      })
+    ),
+    "table_row_chunk"
+  );
+  const child = new StaticRetriever([
+    candidate(generic, 0.65, 1, ["keyword_term_match"]),
+    candidate(table, 0.61, 2, ["keyword_term_match"])
+  ]);
+  const retriever = new RerankingRetriever({
+    profile,
+    retriever: child,
+    reranker: new LightweightReranker({ now: () => FIXED_NOW }),
+    now: () => FIXED_NOW
+  });
+
+  const result = await retriever.retrieve({
+    query: "which table row has revenue 120",
+    mode: "keyword",
+    filter: makeIndexFilter(),
+    topK: 1,
+    retrievalId: "lightweight_table_unit_test",
+    requestedAt: FIXED_NOW
+  });
+
+  assert.equal(result.candidates[0]?.chunk.documentId, "doc_table_row");
+  assert.equal(result.candidates[0]?.reasons.includes("lightweight_searchable_unit_match"), true);
+});
+
+test("lightweight reranking routes formula questions toward equation-derived chunks", async () => {
+  const generic = firstChunk(
+    makeDocument({
+      id: "doc_formula_generic",
+      body: "The appendix discusses retention metrics and model quality."
+    })
+  );
+  const equation = withSearchableUnit(
+    firstChunk(
+      makeDocument({
+        id: "doc_equation_retention",
+        body: "x = y + z"
+      })
+    ),
+    "equation_chunk",
+    ["Equation", "Metric: retention formula", "Text: x = y + z", "Page: 4"].join("\n")
+  );
+  const child = new StaticRetriever([
+    candidate(generic, 0.66, 1, ["keyword_term_match"]),
+    candidate(equation, 0.6, 2, ["keyword_term_match"])
+  ]);
+  const retriever = new RerankingRetriever({
+    profile,
+    retriever: child,
+    reranker: new LightweightReranker({ now: () => FIXED_NOW }),
+    now: () => FIXED_NOW
+  });
+
+  const result = await retriever.retrieve({
+    query: "retention formula equation",
+    mode: "keyword",
+    filter: makeIndexFilter(),
+    topK: 1,
+    retrievalId: "lightweight_equation_unit_test",
+    requestedAt: FIXED_NOW
+  });
+
+  assert.equal(result.candidates[0]?.chunk.documentId, "doc_equation_retention");
+  assert.equal(result.candidates[0]?.reasons.includes("lightweight_searchable_unit_match"), true);
+});
+
+test("lightweight reranking downgrades parser gap chunks as answer evidence", async () => {
+  const answer = firstChunk(
+    makeDocument({
+      id: "doc_answer",
+      body: "OCR page notes say the scanned appendix needs manual review."
+    })
+  );
+  const parserGap = withSearchableUnit(
+    firstChunk(
+      makeDocument({
+        id: "doc_parser_gap",
+        body: "OCR page notes say the scanned appendix needs manual review."
+      })
+    ),
+    "parser_gap_chunk"
+  );
+  const child = new StaticRetriever([
+    candidate(parserGap, 0.9, 1, ["keyword_term_match"]),
+    candidate(answer, 0.85, 2, ["keyword_term_match"])
+  ]);
+  const retriever = new RerankingRetriever({
+    profile,
+    retriever: child,
+    reranker: new LightweightReranker({ now: () => FIXED_NOW }),
+    now: () => FIXED_NOW
+  });
+
+  const result = await retriever.retrieve({
+    query: "ocr page manual review",
+    mode: "keyword",
+    filter: makeIndexFilter(),
+    topK: 2,
+    retrievalId: "lightweight_parser_gap_unit_test",
+    requestedAt: FIXED_NOW
+  });
+
+  assert.equal(result.candidates[0]?.chunk.documentId, "doc_answer");
+  assert.equal(result.candidates[1]?.reasons.includes("lightweight_parser_gap_downgrade"), true);
+});
+
+test("lightweight reranking diversifies near-duplicate evidence", async () => {
+  const first = firstChunk(
+    makeDocument({
+      id: "doc_first_duplicate",
+      body: "Refund billing cancellation evidence is covered in the support policy."
+    })
+  );
+  const duplicate = firstChunk(
+    makeDocument({
+      id: "doc_second_duplicate",
+      body: "Refund billing cancellation evidence is covered in the support policy."
+    })
+  );
+  const complementary = firstChunk(
+    makeDocument({
+      id: "doc_complementary",
+      body: "Refund requests after cancellation require the original receipt."
+    })
+  );
+  const child = new StaticRetriever([
+    candidate(first, 1, 1, ["keyword_term_match"]),
+    candidate(duplicate, 0.98, 2, ["keyword_term_match"]),
+    candidate(complementary, 0.94, 3, ["keyword_term_match"])
+  ]);
+  const retriever = new RerankingRetriever({
+    profile,
+    retriever: child,
+    reranker: new LightweightReranker({ now: () => FIXED_NOW }),
+    now: () => FIXED_NOW
+  });
+
+  const result = await retriever.retrieve({
+    query: "refund billing cancellation",
+    mode: "keyword",
+    filter: makeIndexFilter(),
+    topK: 2,
+    retrievalId: "lightweight_diversity_test",
+    requestedAt: FIXED_NOW
+  });
+
+  assert.deepEqual(
+    result.candidates.map((entry) => entry.chunk.documentId),
+    ["doc_first_duplicate", "doc_complementary"]
+  );
+});
+
 test("model reranking cannot introduce unknown candidate chunk ids", async () => {
   const first = firstChunk(
     makeDocument({
@@ -414,6 +620,54 @@ function firstChunk(document: ReturnType<typeof makeDocument>): RagChunk {
   const [chunk] = chunkDocument({ document }).chunks;
   assert.ok(chunk);
   return chunk;
+}
+
+function withCitationEvidence(chunk: RagChunk): RagChunk {
+  return {
+    ...chunk,
+    layoutRegionIds: ["region_refund_policy"],
+    boundingBoxes: [
+      {
+        pageNumber: 3,
+        x: 0.1,
+        y: 0.2,
+        width: 0.3,
+        height: 0.1,
+        unit: "normalized"
+      }
+    ],
+    citation: {
+      ...chunk.citation,
+      locator: "page 3, paragraph 2",
+      pageNumber: 3,
+      layoutRegionIds: ["region_refund_policy"],
+      boundingBoxes: [
+        {
+          pageNumber: 3,
+          x: 0.1,
+          y: 0.2,
+          width: 0.3,
+          height: 0.1,
+          unit: "normalized"
+        }
+      ]
+    }
+  };
+}
+
+function withSearchableUnit(
+  chunk: RagChunk,
+  searchableUnitType: string,
+  searchableEmbeddingText?: string
+): RagChunk {
+  return {
+    ...chunk,
+    metadata: {
+      ...(chunk.metadata ?? {}),
+      searchableUnitType,
+      ...(searchableEmbeddingText === undefined ? {} : { searchableEmbeddingText })
+    }
+  };
 }
 
 function candidate(

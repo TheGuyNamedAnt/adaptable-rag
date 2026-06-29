@@ -1,5 +1,6 @@
 import type { RagChunk } from "../documents/chunk.js";
 import type { ChunkVector, VectorStore } from "../indexing/vector-store.js";
+import { embeddingIdentityFor, embeddingIndexConfigHashFor } from "./embedding-identity.js";
 import type { EmbeddingAdapter } from "./embedding-types.js";
 
 export interface EmbeddingIndexerOptions {
@@ -46,7 +47,7 @@ export class EmbeddingIndexer {
     const result = await this.adapter.embed({
       inputs: request.chunks.map((chunk) => ({
         id: chunk.id,
-        text: chunk.text
+        text: embeddingTextForChunk(chunk)
       })),
       requestedAt: embeddedAt
     });
@@ -70,6 +71,12 @@ export class EmbeddingIndexer {
     const embeddingsByChunkId = new Map(
       result.embeddings.map((embedding) => [embedding.id, embedding])
     );
+    const identity = embeddingIdentityFor({
+      provider: result.provider,
+      modelName: result.modelName,
+      dimensions: result.dimensions,
+      adapterId: this.adapter.id
+    });
     const vectors: ChunkVector[] = [];
 
     for (const chunk of request.chunks) {
@@ -92,17 +99,34 @@ export class EmbeddingIndexer {
         continue;
       }
 
+      const indexConfigHash = embeddingIndexConfigHashFor({
+        provider: result.provider,
+        modelName: result.modelName,
+        dimensions: result.dimensions,
+        adapterId: this.adapter.id,
+        ...optionalIdentityMetadata(chunk.metadata)
+      });
+
       vectors.push({
-        id: vectorId(result.modelName, chunk.id),
+        id: vectorId(identity.embeddingConfigHash, chunk.id),
         chunkId: chunk.id,
         documentId: chunk.documentId,
         tenantId: chunk.accessScope.tenantId,
         namespaceId: chunk.namespaceId,
         textHash: chunk.textHash,
         embeddingModel: result.modelName,
+        embeddingProvider: result.provider,
+        embeddingConfigHash: identity.embeddingConfigHash,
         dimensions: result.dimensions,
         vector: embedding.vector,
-        embeddedAt
+        embeddedAt,
+        metadata: {
+          ...(chunk.metadata ?? {}),
+          embeddingProvider: result.provider,
+          embeddingAdapterId: this.adapter.id,
+          embeddingConfigHash: identity.embeddingConfigHash,
+          embeddingIndexConfigHash: indexConfigHash
+        }
       });
     }
 
@@ -122,6 +146,40 @@ export class EmbeddingIndexer {
   }
 }
 
-function vectorId(modelName: string, chunkId: string): string {
-  return `${modelName.replace(/[^a-z0-9_-]/gi, "_")}_${chunkId}`;
+function vectorId(embeddingConfigHash: string, chunkId: string): string {
+  return `${embeddingConfigHash}_${chunkId}`;
+}
+
+function embeddingTextForChunk(chunk: RagChunk): string {
+  const enriched = stringMetadata(chunk.metadata, "searchableEmbeddingText");
+  return enriched ?? chunk.text;
+}
+
+function stringMetadata(
+  metadata: Readonly<Record<string, string | number | boolean>> | undefined,
+  key: string
+): string | undefined {
+  const value = metadata?.[key];
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function optionalIdentityMetadata(
+  metadata: Readonly<Record<string, string | number | boolean>> | undefined
+): {
+  readonly chunkingPolicyId?: string;
+  readonly chunkingPolicyVersion?: string;
+  readonly chunkerVersion?: string;
+  readonly preprocessingVersion?: string;
+} {
+  const chunkingPolicyId = stringMetadata(metadata, "chunkingPolicyId");
+  const chunkingPolicyVersion = stringMetadata(metadata, "chunkingPolicyVersion");
+  const chunkerVersion = stringMetadata(metadata, "chunkerVersion");
+  const preprocessingVersion = stringMetadata(metadata, "preprocessingVersion");
+
+  return {
+    ...(chunkingPolicyId === undefined ? {} : { chunkingPolicyId }),
+    ...(chunkingPolicyVersion === undefined ? {} : { chunkingPolicyVersion }),
+    ...(chunkerVersion === undefined ? {} : { chunkerVersion }),
+    ...(preprocessingVersion === undefined ? {} : { preprocessingVersion })
+  };
 }

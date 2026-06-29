@@ -125,6 +125,8 @@ test("sec html parser handles SEC edge markup, spans, and entity decoding", asyn
 <table>
   <tr><th rowspan="2">Name<br>Field</th><th colspan="2">Jurisdiction</th></tr>
   <tr><td colspan="1">Google LLC</td><td>Delaware</td></tr>
+  <tr><td>S&ouml;fft Shoe Company, LLC</td><td>Delaware</td></tr>
+  <tr><td>Duracell International Operations S&agrave;rl</td><td>Switzerland</td></tr>
 </table>
 </body>
 </html>`,
@@ -136,6 +138,8 @@ test("sec html parser handles SEC edge markup, spans, and entity decoding", asyn
   assert.equal(parsed.document.layout?.strategy, "table_structure");
   assert.match(parsed.document.body, /Visible & A A/u);
   assert.match(parsed.document.body, /Name Field \| Jurisdiction/u);
+  assert.match(parsed.document.body, /Söfft Shoe Company, LLC \| Delaware/u);
+  assert.match(parsed.document.body, /Duracell International Operations Sàrl \| Switzerland/u);
   assert.doesNotMatch(parsed.document.body, /Hidden/u);
 
   const table = parsed.document.layout?.tables?.[0];
@@ -143,6 +147,35 @@ test("sec html parser handles SEC edge markup, spans, and entity decoding", asyn
   assert.equal(table.cells[0]?.rowSpan, 2);
   assert.equal(table.cells[1]?.columnSpan, 2);
   assert.equal(table.cells[2]?.columnSpan, undefined);
+});
+
+test("sec html parser preserves common Latin named entities in entity labels", async () => {
+  const parser = new SecHtmlParser();
+  const parsed = await parser.parse({
+    sourceId: "sec_source",
+    sourceKind: "local_file",
+    title: "latin-entities.htm",
+    contentType: "text/html",
+    text: `<html>
+<body>
+<table>
+  <tr><td>Name</td><td>Jurisdiction</td></tr>
+  <tr><td>Cr&eacute;dit Agricole CIB</td><td>France</td></tr>
+  <tr><td>Pe&ntilde;a Holdings LLC</td><td>Spain</td></tr>
+  <tr><td>Fran&ccedil;ais Reinsurance Ltd.</td><td>Canada</td></tr>
+  <tr><td>M&uuml;nchen Services GmbH</td><td>Germany</td></tr>
+</table>
+</body>
+</html>`,
+    requestedAt
+  });
+
+  assert.equal(parsed.warnings.length, 0);
+  assert.match(parsed.document.body, /Crédit Agricole CIB \| France/u);
+  assert.match(parsed.document.body, /Peña Holdings LLC \| Spain/u);
+  assert.match(parsed.document.body, /Français Reinsurance Ltd\. \| Canada/u);
+  assert.match(parsed.document.body, /München Services GmbH \| Germany/u);
+  assert.doesNotMatch(parsed.document.body, /Cr dit|Pe a|Fran ais|M nchen/u);
 });
 
 test("sec html parser warns on non-html input without SEC text wrapper", async () => {

@@ -3,7 +3,7 @@ import tseslint from "typescript-eslint";
 
 export default [
   {
-    ignores: ["coverage/**", "dist/**", "node_modules/**", ".rag/**"]
+    ignores: ["coverage/**", "dist/**", "node_modules/**", "admin/**", ".rag/**"]
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,

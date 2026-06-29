@@ -17,12 +17,27 @@ npm run check
 npm run test
 ```
 
-Run the local HTTP service with the generic docs profile:
+Run the admin console. This starts the local RAG HTTP service on `8787` and the
+admin UI on `8788` together:
 
 ```bash
-npm run build
-RAG_APP_PROFILE_PRESET=generic-docs RAG_HTTP_AUTH_MODE=disabled npm run serve
+npm --prefix admin install
+npm run admin:dev
 ```
+
+If you intentionally want only the UI because the RAG HTTP service is already running
+elsewhere, use:
+
+```bash
+npm run admin:dev -- --external-rag
+```
+
+The admin console is a redacted operational UI for `/health`, `/ready`, `/metrics`,
+Postgres-backed ingestion jobs, source health, Answer Lab, durable trace history,
+citations, rejected evidence, graph import and benchmark reports, parser/document-QA
+benchmarks, parser quality, ingestion integrity, provider smoke, embedding migration,
+and vector cleanup artifacts. It lives in `admin/` so the core RAG package stays
+portable.
 
 ## What It Provides
 
@@ -32,10 +47,23 @@ RAG_APP_PROFILE_PRESET=generic-docs RAG_HTTP_AUTH_MODE=disabled npm run serve
 - Keyword, vector, hybrid, visual-vector, and knowledge-map retrieval paths.
 - Grounded answer orchestration with citation checks, budget checks, safe traces, and optional model-backed judges.
 - Provider presets for model, embedding, visual embedding, reranking, grounding judge, and hosted vector stores.
+- Plug-and-play adapter and vector-store contracts for safe provider, chunker, and vector DB swaps.
 - Production CLI and HTTP entrypoints with config loading, auth, rate limits, health, readiness, metrics, and self-tests.
 - Operational gates for CI, evals, trace replay, SLO checks, alert dry-runs, incident bundles, and human review exports.
 
 ## Core Boundary
+
+For the component-swap contracts and 10M-chunk readiness model, see
+[Plug-and-Play RAG Architecture](docs/rag-plug-and-play-architecture.md).
+
+For snapshot-backed stores, old vector generations can be inspected with:
+
+```bash
+node scripts/run-vector-generation-cleanup.mjs \
+  --snapshot .rag/vectors.json \
+  --keep-config-hashes <current-embedding-config-hash> \
+  --output .rag/vector-cleanup/plan.json
+```
 
 Profiles can configure behavior, but the core enforces the non-negotiable parts:
 
@@ -88,6 +116,7 @@ src/answer/        Grounding gate and answer validation
 src/model/         Provider-neutral model and grounding judge adapters
 src/runtime/       Production app, CLI, HTTP server, sync, ingest, and runtime assembly
 src/evals/         Eval runner, reports, replay, SLOs, incidents, and review queues
+admin/             Optional Next.js admin console for redacted operations inspection
 templates/         Copyable project/company integration skeletons
 deploy/            Docker, env, provider, Postgres, and production runbooks
 docs/              Longer architecture and reference documentation
@@ -101,6 +130,14 @@ npm run lint             # ESLint
 npm run format:check     # Prettier check
 npm run test             # Build and run tests
 npm run test:coverage    # Coverage-gated tests
+npm run admin:dev        # Run local RAG HTTP service on 8787 plus admin UI on 8788
+npm run admin:dev:ui     # Run only the admin UI
+npm run admin:smoke      # Start both services, verify readiness, then stop
+npm run admin:start      # Production-start RAG HTTP plus admin UI
+npm run admin:check      # Type-check the admin console
+npm run admin:build      # Production-build the admin console
+npm run smoke:providers  # Provider probe report for the admin Quality Ops page
+npm run graph:benchmark  # Graph store benchmark report for the admin Graph page
 npm run evals            # Profile evals and regression report
 npm run ci               # Full local quality gate used by GitHub Actions
 ```
@@ -111,12 +148,16 @@ Company deployment checks:
 npm run company:validate
 npm run company:smoke
 npm run company:smoke:postgres
+node dist/runtime/production-cli.js inspect-ingestion-jobs --limit 20
+node dist/runtime/production-cli.js inspect-ingestion-job --job-id company_sync_20260624 --document-status failed
+node dist/runtime/production-cli.js inspect-eval-failure --summary .rag/eval-runs/latest/summary.json
 ```
 
 ## Documentation
 
 - [Docs index](docs/README.md)
 - [Full reference](docs/full-reference.md)
+- [Parser and document QA benchmarks](docs/parser-benchmarks.md)
 - [Deployment guide](deploy/README.md)
 - [Company production runbook](deploy/company-production-runbook.md)
 - [Company connector template](templates/company-connector-pack/)

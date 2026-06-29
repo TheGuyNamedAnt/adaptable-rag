@@ -6,6 +6,16 @@ import path from "node:path";
 import test from "node:test";
 
 import { genericDocsProfile } from "../profiles/examples/generic-docs.profile.js";
+import {
+  InMemoryVectorStore,
+  type ChunkVector,
+  type VectorSnapshot,
+  type VectorStore
+} from "../indexing/vector-store.js";
+import {
+  POSTGRES_VECTOR_SCALE_CAPABILITIES,
+  type VectorGenerationInventoryProvider
+} from "../indexing/scale-capabilities.js";
 import { PostgresSourceSyncLedgerStore } from "../sync/sync-ledger.js";
 import type {
   ProviderHttpRequest,
@@ -206,6 +216,25 @@ test("production config supports HTTP auth hashes, rotated env tokens, and clien
   assert.equal(rotatedConfig.http.rateLimit.maxKeys, 2);
   assert.equal(JSON.stringify(rotatedConfig).includes("edge-token-a"), false);
   assert.equal(JSON.stringify(rotatedConfig).includes("edge-token-b"), false);
+});
+
+test("production config supports signed principal freshness and issuer settings", () => {
+  const config = loadProductionRagAppConfigFromEnv({
+    env: providerEnv({
+      RAG_PRINCIPAL_MODE: "signed_header",
+      RAG_PRINCIPAL_SIGNING_SECRET_ENV: "RAG_PRINCIPAL_SECRET",
+      RAG_PRINCIPAL_SECRET: "principal-secret",
+      RAG_PRINCIPAL_MAX_AGE_MS: "300000",
+      RAG_PRINCIPAL_CLOCK_SKEW_MS: "60000",
+      RAG_PRINCIPAL_ISSUER: "identity-gateway"
+    })
+  });
+
+  assert.equal(config.http.principal?.mode, "signed_header");
+  assert.deepEqual(config.http.principal?.signingSecrets, ["principal-secret"]);
+  assert.equal(config.http.principal?.maxAgeMs, 300000);
+  assert.equal(config.http.principal?.clockSkewMs, 60000);
+  assert.equal(config.http.principal?.issuer, "identity-gateway");
 });
 
 test("production config supports disabled and memory visual vector env shapes", () => {
@@ -866,6 +895,135 @@ test("production app creates visual embedding providers from env and reports saf
   assert.equal(JSON.stringify(health).includes("visual-secret"), false);
 });
 
+test("production app health reports old vector generations against active embedding config", () => {
+  const { index, chunks } = makeIndexedFixture();
+  const embeddingEnv = providerEnv({
+    RAG_EMBEDDING_PROVIDER: "indexed-embedding",
+    RAG_EMBEDDING_MODEL_NAME: "embedding-model",
+    RAG_EMBEDDING_ENDPOINT: "https://provider.example.test/v1/embeddings",
+    RAG_EMBEDDING_API_KEY: "embedding-secret",
+    RAG_EMBEDDING_DIMENSIONS: "3"
+  });
+  const app = createProductionRagApp({
+    config: productionConfig({
+      storage: {
+        index: { kind: "memory" },
+        vector: { kind: "memory", dimensions: 3 }
+      },
+      providers: {
+        ...productionConfig().providers,
+        embeddingMode: "required"
+      }
+    }),
+    env: embeddingEnv,
+    transport: new MockProviderTransport(),
+    chunkStore: index,
+    now: () => FIXED_NOW
+  });
+  const [firstChunk] = chunks;
+  assert.ok(firstChunk);
+  const vectorStore = app.vectorStore;
+  assert.ok(vectorStore instanceof InMemoryVectorStore);
+  const activeHash = app.health().vector?.embeddingCompatibility?.configHash;
+  assert.ok(activeHash);
+  vectorStore.addChunkVectors([
+    chunkVector(firstChunk.id, firstChunk.documentId, activeHash),
+    chunkVector(firstChunk.id, firstChunk.documentId, "old_hash"),
+    chunkVector(firstChunk.id, firstChunk.documentId, "older_hash")
+  ]);
+
+  const health = app.health();
+
+  assert.equal(health.vector?.embeddingCompatibility?.configHash, activeHash);
+  assert.equal(health.vector?.generationCount, 3);
+  assert.equal(health.vector?.oldGenerationCount, 2);
+});
+
+test("production app async health uses scalable vector generation inventory", async () => {
+  const { index } = makeIndexedFixture();
+  let activeHash = "";
+  let snapshotCalls = 0;
+  let inventoryCalls = 0;
+  const vectorStore: VectorStore & VectorGenerationInventoryProvider = {
+    capabilities: {
+      storageKind: "postgres",
+      durable: true,
+      enforcesAccessFilters: true,
+      supportsCosineSimilarity: true,
+      dimensions: 3,
+      scale: POSTGRES_VECTOR_SCALE_CAPABILITIES
+    },
+    addChunkVectors: async () => [],
+    deleteVectorsForDocument: async () => 0,
+    findNearestVectors: async () => ({ candidates: [], rejected: [], candidatePoolSize: 0 }),
+    snapshot: async (): Promise<VectorSnapshot> => {
+      snapshotCalls += 1;
+      return { version: 1, vectors: [] };
+    },
+    vectorCount: async () => 2,
+    vectorGenerationInventory: async () => {
+      inventoryCalls += 1;
+      return [
+        {
+          tenantId: TEST_PRINCIPAL.tenantId,
+          namespaceId: "test-namespace",
+          embeddingProvider: "indexed-embedding",
+          embeddingModel: "embedding-model",
+          embeddingConfigHash: activeHash,
+          vectorCount: 1,
+          documentCount: 1
+        },
+        {
+          tenantId: TEST_PRINCIPAL.tenantId,
+          namespaceId: "test-namespace",
+          embeddingProvider: "indexed-embedding",
+          embeddingModel: "embedding-model",
+          embeddingConfigHash: "old_hash",
+          vectorCount: 1,
+          documentCount: 1
+        }
+      ];
+    }
+  };
+  const app = createProductionRagApp({
+    config: productionConfig({
+      storage: {
+        index: { kind: "memory" },
+        vector: { kind: "none" }
+      },
+      providers: {
+        ...productionConfig().providers,
+        embeddingMode: "required"
+      }
+    }),
+    env: providerEnv({
+      RAG_EMBEDDING_PROVIDER: "indexed-embedding",
+      RAG_EMBEDDING_MODEL_NAME: "embedding-model",
+      RAG_EMBEDDING_ENDPOINT: "https://provider.example.test/v1/embeddings",
+      RAG_EMBEDDING_API_KEY: "embedding-secret",
+      RAG_EMBEDDING_DIMENSIONS: "3"
+    }),
+    transport: new MockProviderTransport(),
+    chunkStore: index,
+    vectorStore,
+    now: () => FIXED_NOW
+  });
+
+  const syncHealth = app.health();
+  activeHash = syncHealth.vector?.embeddingCompatibility?.configHash ?? "";
+  assert.ok(activeHash);
+  assert.equal(syncHealth.vector?.generationCount, undefined);
+  assert.equal(snapshotCalls, 1);
+
+  assert.ok(app.healthAsync);
+  const asyncHealth = await app.healthAsync();
+
+  assert.equal(inventoryCalls, 1);
+  assert.equal(snapshotCalls, 1);
+  assert.equal(asyncHealth.vector?.generationCount, 2);
+  assert.equal(asyncHealth.vector?.oldGenerationCount, 1);
+});
+
 test("production app self-test reports static capability and dimension failures", async () => {
   const { index } = makeIndexedFixture();
   const base = productionConfig();
@@ -1041,4 +1199,28 @@ test("production app self-test redacts failed provider probe messages", async ()
 
 function sha256Hex(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function chunkVector(
+  chunkId: string,
+  documentId: string,
+  embeddingConfigHash: string
+): ChunkVector {
+  return {
+    id: `${embeddingConfigHash}_${chunkId}`,
+    chunkId,
+    documentId,
+    tenantId: TEST_PRINCIPAL.tenantId,
+    namespaceId: "test-namespace",
+    textHash: "text_hash",
+    embeddingModel: "embedding-model",
+    embeddingProvider: "indexed-embedding",
+    embeddingConfigHash,
+    dimensions: 3,
+    vector: [1, 0, 0],
+    embeddedAt: FIXED_NOW,
+    metadata: {
+      embeddingIndexConfigHash: `${embeddingConfigHash}_index`
+    }
+  };
 }

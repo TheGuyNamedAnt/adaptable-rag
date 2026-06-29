@@ -1,0 +1,32 @@
+{
+  "info": {
+    "description": "Synthetic TableBank-compatible fixture for parser benchmark tests.",
+    "license": "Generated test fixture; no external dataset content."
+  },
+  "images": [
+    {
+      "id": 1,
+      "file_name": "mini-table.png",
+      "width": 160,
+      "height": 100
+    }
+  ],
+  "categories": [
+    {
+      "id": 1,
+      "name": "table"
+    }
+  ],
+  "annotations": [
+    {
+      "id": 1,
+      "image_id": 1,
+      "category_id": 1,
+      "bbox": [20, 20, 120, 50],
+      "area": 6000,
+      "iscrowd": 0,
+      "text": "Metric Value Revenue 120 Cost 75",
+      "html": "<table><tr><td>Metric</td><td>Value</td></tr><tr><td>Revenue</td><td>120</td></tr><tr><td>Cost</td><td>75</td></tr></table>"
+    }
+  ]
+}

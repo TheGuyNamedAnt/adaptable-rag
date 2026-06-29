@@ -3,6 +3,10 @@ import { createHash } from "node:crypto";
 import test from "node:test";
 
 import { genericDocsProfile } from "../profiles/examples/generic-docs.profile.js";
+import {
+  encodeSignedPrincipalPayload,
+  signPrincipalPayload
+} from "../security/principal-resolver.js";
 import type {
   ProviderHttpRequest,
   ProviderHttpResponse,
@@ -175,6 +179,128 @@ test("production HTTP server exposes health and answer routes without raw contex
   }
 });
 
+test("production HTTP server can require a signed principal header", async () => {
+  const { index, chunks } = makeIndexedFixture();
+  const chunkId = chunks[0]?.id;
+  assert.ok(chunkId);
+  const transport = new MockProviderTransport([
+    okResponse({
+      choices: [
+        {
+          message: {
+            content: JSON.stringify({
+              answer: "Refund requests require support review.",
+              citationChunkIds: [chunkId],
+              evidenceSummary: "The indexed policy says refund requests require review.",
+              confidence: "medium"
+            })
+          }
+        }
+      ],
+      usage: {
+        prompt_tokens: 10,
+        completion_tokens: 5,
+        total_tokens: 15
+      }
+    })
+  ]);
+  const principalSecret = "principal-secret";
+  const payload = encodeSignedPrincipalPayload({
+    principal: TEST_PRINCIPAL,
+    issuer: "test-identity-gateway",
+    issuedAt: FIXED_NOW
+  });
+  const app = createProductionRagApp({
+    config: {
+      ...CONFIG,
+      http: {
+        ...CONFIG.http,
+        principal: {
+          mode: "signed_header",
+          headerName: "x-rag-principal",
+          signatureHeaderName: "x-rag-principal-signature",
+          signingSecrets: [principalSecret],
+          maxAgeMs: 5 * 60 * 1000,
+          clockSkewMs: 0,
+          issuer: "test-identity-gateway"
+        }
+      }
+    },
+    env: ENV,
+    transport,
+    chunkStore: index,
+    now: () => FIXED_NOW
+  });
+  const http = createProductionRagHttpServer({ app, nowMs: () => Date.parse(FIXED_NOW) });
+  const address = await http.listen();
+  const baseUrl = `http://${address.host}:${address.port}`;
+
+  try {
+    const answer = await fetch(`${baseUrl}/answer`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${EDGE_TOKEN}`,
+        "content-type": "application/json",
+        "x-rag-principal": payload,
+        "x-rag-principal-signature": `sha256=${signPrincipalPayload(payload, principalSecret)}`
+      },
+      body: JSON.stringify({
+        question: "What is the refund policy?",
+        tenantId: TEST_PRINCIPAL.tenantId,
+        namespaceId: "test-namespace",
+        principal: {
+          ...TEST_PRINCIPAL,
+          namespaceIds: ["wrong-namespace"],
+          roles: []
+        },
+        requestedAt: FIXED_NOW
+      })
+    });
+    assert.equal(answer.status, 200);
+    const answerBody = (await answer.json()) as { readonly status: string };
+    assert.equal(answerBody.status, "succeeded");
+
+    const missingPrincipal = await fetch(`${baseUrl}/answer`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${EDGE_TOKEN}`,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        question: "What is the refund policy?",
+        tenantId: TEST_PRINCIPAL.tenantId,
+        namespaceId: "test-namespace",
+        requestedAt: FIXED_NOW
+      })
+    });
+    assert.equal(missingPrincipal.status, 401);
+
+    const expiredPayload = encodeSignedPrincipalPayload({
+      principal: TEST_PRINCIPAL,
+      issuer: "test-identity-gateway",
+      issuedAt: new Date(Date.parse(FIXED_NOW) - 10 * 60 * 1000).toISOString()
+    });
+    const expiredPrincipal = await fetch(`${baseUrl}/answer`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${EDGE_TOKEN}`,
+        "content-type": "application/json",
+        "x-rag-principal": expiredPayload,
+        "x-rag-principal-signature": `sha256=${signPrincipalPayload(expiredPayload, principalSecret)}`
+      },
+      body: JSON.stringify({
+        question: "What is the refund policy?",
+        tenantId: TEST_PRINCIPAL.tenantId,
+        namespaceId: "test-namespace",
+        requestedAt: FIXED_NOW
+      })
+    });
+    assert.equal(expiredPrincipal.status, 401);
+  } finally {
+    await http.close();
+  }
+});
+
 test("production HTTP server emits request ids, redacted logs, and metrics", async () => {
   const { index } = makeIndexedFixture();
   const logs: ProductionHttpLogEvent[] = [];
@@ -215,6 +341,9 @@ test("production HTTP server emits request ids, redacted logs, and metrics", asy
     assert.equal(metrics.completedRequests, 1);
     assert.equal(metrics.byRoute["health"], 1);
     assert.equal(metrics.byStatusCode["200"], 1);
+    assert.equal(metrics.latencyMs.count, 1);
+    assert.equal(metrics.byRouteLatencyMs["health"]?.count, 1);
+    assert.deepEqual(metrics.byAnswerStatus, {});
 
     const access = logs.find((event) => event.event === "http_access");
     assert.ok(access);
@@ -360,6 +489,79 @@ test("production HTTP server requires answer auth and rate limits before model w
     assert.equal(metrics.authDenied, 1);
     assert.equal(metrics.rateLimited, 1);
     assert.equal(metrics.answerSucceeded, 1);
+    assert.equal(metrics.byAnswerStatus["succeeded"], 1);
+    assert.equal(metrics.byRouteLatencyMs["answer"]?.count, 3);
+    assert.equal(metrics.rag.answerCount, 1);
+    assert.equal(metrics.rag.retrievedChunkCount, 1);
+    assert.equal(metrics.rag.citationCount, 1);
+    assert.equal(metrics.rag.lowCitationAnswerCount, 0);
+    assert.equal(metrics.rag.byEvidenceStatus["answerable"], 1);
+    assert.equal(metrics.rag.modelPromptTokens, 10);
+    assert.equal(metrics.rag.modelCompletionTokens, 5);
+    assert.equal(metrics.rag.modelTotalTokens, 15);
+    assert.equal(metrics.rag.modelLatencyMs.p95, 10);
+    assert.equal(metrics.rag.byProfile["generic-docs"], 1);
+    assert.equal(metrics.rag.byNamespace["test-namespace"], 1);
+    assert.equal(metrics.rag.byTenantHash[sha256Hex(TEST_PRINCIPAL.tenantId)], 1);
+
+    const prometheus = await fetch(`${baseUrl}/metrics?format=prometheus`);
+    assert.equal(prometheus.status, 200);
+    const prometheusBody = await prometheus.text();
+    assert.match(prometheusBody, /rag_answer_status_total\{status="succeeded"\} 1/);
+    assert.match(prometheusBody, /rag_answers_by_tenant_hash_total/);
+  } finally {
+    await http.close();
+  }
+});
+
+test("production HTTP server can gate readiness on startup self-test", async () => {
+  const { index } = makeIndexedFixture();
+  const app = createProductionRagApp({
+    config: CONFIG,
+    env: ENV,
+    transport: new MockProviderTransport(),
+    chunkStore: index,
+    now: () => FIXED_NOW
+  });
+  const http = createProductionRagHttpServer({
+    app: {
+      ...app,
+      selfTest: async () => ({
+        status: "failed",
+        checkedAt: FIXED_NOW,
+        profileId: "generic-docs",
+        namespaceId: "test-namespace",
+        retrievalMode: "keyword",
+        probeProviders: false,
+        checkCount: 1,
+        failedCount: 1,
+        skippedCount: 0,
+        checks: [
+          {
+            id: "index_storage_readiness",
+            kind: "storage",
+            status: "failed",
+            message: "Index readiness failed."
+          }
+        ]
+      })
+    },
+    readiness: { mode: "self_test" }
+  });
+  const address = await http.listen();
+  const baseUrl = `http://${address.host}:${address.port}`;
+
+  try {
+    const response = await fetch(`${baseUrl}/ready`);
+    assert.equal(response.status, 503);
+    const body = (await response.json()) as {
+      readonly ready: boolean;
+      readonly selfTest: { readonly status: string; readonly failedCount: number };
+    };
+    assert.equal(body.ready, false);
+    assert.equal(body.selfTest.status, "failed");
+    assert.equal(body.selfTest.failedCount, 1);
+    assert.equal(http.metrics().byOutcome["not_ready"], 1);
   } finally {
     await http.close();
   }

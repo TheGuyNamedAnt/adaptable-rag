@@ -129,6 +129,40 @@ test("rejects namespace mismatches, invalid confidence, and invalid temporal val
   assert.equal(codes.includes("invalid_temporal_validity"), true);
 });
 
+test("rejects duplicate entity and relation ids", () => {
+  const batch = makeBatch({
+    entities: [
+      makeEntity("entity_parent", {
+        name: "Parent LLC",
+        normalizedName: "parent"
+      }),
+      makeEntity("entity_parent", {
+        name: "Parent Duplicate LLC",
+        normalizedName: "parent duplicate"
+      }),
+      makeEntity("entity_child")
+    ],
+    relations: [
+      makeRelation("rel_duplicate", {
+        sourceEntityId: "entity_parent",
+        targetEntityId: "entity_child"
+      }),
+      makeRelation("rel_duplicate", {
+        sourceEntityId: "entity_child",
+        targetEntityId: "entity_parent"
+      })
+    ]
+  });
+  const result = validateGraphExtractionBatch(batch);
+  const duplicateIssues = result.errors.filter((issue) => issue.code === "duplicate_id");
+
+  assert.equal(result.valid, false);
+  assert.deepEqual(
+    duplicateIssues.map((issue) => issue.path),
+    ["entities[1].id", "relations[1].id"]
+  );
+});
+
 test("allows configured inferred and evidence-free superseded graph facts", () => {
   const permissiveOntology: GraphOntology = {
     ...ontology,

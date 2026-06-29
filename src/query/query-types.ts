@@ -4,6 +4,28 @@ export type PlannedQueryKind = "original" | "low_level" | "high_level" | "graph"
 
 export type QueryPlannerStrategy = "default_heuristic" | "model_assisted" | "hyde_augmented";
 
+export type QueryIntentKind =
+  | "general"
+  | "definition"
+  | "troubleshooting"
+  | "comparison"
+  | "policy"
+  | "relationship"
+  | "freshness"
+  | "table"
+  | "visual"
+  | "procedural";
+
+export type QuerySourceHint =
+  | "docs"
+  | "support"
+  | "tickets"
+  | "incidents"
+  | "tables"
+  | "visuals"
+  | "graph"
+  | "recent";
+
 export type GraphQueryRoute = "none" | "graph_optional" | "graph_required";
 export type GraphQueryDirection = "any" | "outgoing" | "incoming";
 export type GraphQueryExecutionMode = "expand" | "graph_first";
@@ -30,6 +52,14 @@ export interface GraphQueryIntent {
   readonly reason: string;
 }
 
+export interface QueryIntent {
+  readonly primary: QueryIntentKind;
+  readonly secondary: readonly QueryIntentKind[];
+  readonly sourceHints: readonly QuerySourceHint[];
+  readonly confidence: number;
+  readonly reason: string;
+}
+
 export interface PlannedQuery {
   readonly id: string;
   readonly query: string;
@@ -46,6 +76,10 @@ export interface QueryPlanTrace {
   readonly plannedQueryHashes: readonly string[];
   readonly lowLevelKeywordHashes: readonly string[];
   readonly highLevelKeywordHashes: readonly string[];
+  readonly primaryIntent: QueryIntentKind;
+  readonly secondaryIntentHashes: readonly string[];
+  readonly sourceHintHashes: readonly string[];
+  readonly intentConfidence: number;
   readonly graphRoute: GraphQueryRoute;
   readonly graphDirection?: GraphQueryDirection;
   readonly graphExecutionMode?: GraphQueryExecutionMode;
@@ -58,6 +92,7 @@ export interface QueryPlanTrace {
 
 export interface QueryPlan {
   readonly originalQuestion: string;
+  readonly intent: QueryIntent;
   readonly lowLevelKeywords: readonly string[];
   readonly highLevelKeywords: readonly string[];
   readonly graphIntent: GraphQueryIntent;

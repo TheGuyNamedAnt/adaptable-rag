@@ -369,11 +369,16 @@ test("maps provider statuses consistently", () => {
 });
 
 test("redacts common secret patterns", () => {
-  const redacted = redactText("Bearer abc123 api_key=secret password=hunter2", ["secret"]);
+  const redacted = redactText(
+    "Bearer abc123 api_key=live-key password:hunter2 token=tok secret:shh",
+    ["live-key"]
+  );
 
   assert.equal(redacted.includes("abc123"), false);
+  assert.equal(redacted.includes("live-key"), false);
   assert.equal(redacted.includes("hunter2"), false);
-  assert.equal(redacted.includes("secret"), false);
+  assert.equal(redacted.includes("token=tok"), false);
+  assert.equal(redacted.includes("shh"), false);
 });
 
 test("plugs into the generation orchestrator without bypassing validation", async () => {

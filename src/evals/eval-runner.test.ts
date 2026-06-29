@@ -23,7 +23,7 @@ test("declared profile eval suites pass and cover every required check", async (
 
   assert.equal(summary.passed, true, summary.failures.join("\n"));
   assert.equal(summary.suiteCount, 3);
-  assert.equal(summary.caseCount, 19);
+  assert.equal(summary.caseCount, 20);
   for (const suite of summary.suites) {
     assert.deepEqual(suite.missingRequiredChecks, []);
     assert.ok(suite.cases.every((evalCase) => evalCase.passed));
@@ -149,6 +149,31 @@ test("JSONL eval parser preserves extraction-quality fixtures", async () => {
   }
 });
 
+test("JSONL eval parser preserves query planning and evidence strategy expectations", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "rag-evals-"));
+  const filePath = path.join(tempDir, "planner.jsonl");
+  try {
+    await writeFile(
+      filePath,
+      `${JSON.stringify(queryPlanningEvalCase("planner-parser", { requiredGraphRoute: "graph_optional" }))}\n`
+    );
+
+    const cases = await loadJsonlEvalCases(filePath);
+
+    assert.equal(cases[0]?.checks.includes("query_planning"), true);
+    assert.equal(cases[0]?.expect.requiredPrimaryIntent, "freshness");
+    assert.deepEqual(cases[0]?.expect.requiredSecondaryIntents, ["troubleshooting"]);
+    assert.deepEqual(cases[0]?.expect.requiredSourceHints, ["recent", "support"]);
+    assert.equal(cases[0]?.expect.requiredGraphRoute, "graph_optional");
+    assert.equal(cases[0]?.expect.requiredAdaptiveRetryStrategy, "freshness_expansion");
+    assert.equal(cases[0]?.expect.requiredAdaptiveDiagnosisCode, "freshness_requested");
+    assert.equal(cases[0]?.expect.requiredFreshnessTraceApplied, true);
+    assert.equal(cases[0]?.expect.minimumFreshnessBoostedCandidates, 1);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("runtime evals can enforce layout relation recall and table caption preservation", async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "rag-evals-"));
   try {
@@ -188,6 +213,47 @@ test("runtime evals can enforce layout relation recall and table caption preserv
   }
 });
 
+test("runtime evals can enforce query planning expectations", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "rag-evals-"));
+  try {
+    const existingAdversarial = await readFile(
+      "profiles/generic-docs/evals/adversarial.jsonl",
+      "utf8"
+    );
+    await writeFile(
+      path.join(tempDir, "golden.jsonl"),
+      `${JSON.stringify(
+        queryPlanningEvalCase("planner-runtime", {
+          requiredAdaptiveRetryStrategy: undefined,
+          requiredAdaptiveDiagnosisCode: undefined
+        })
+      )}\n`
+    );
+    await writeFile(path.join(tempDir, "adversarial.jsonl"), `${existingAdversarial.trim()}\n`);
+    const profile: RagProfile = {
+      ...genericDocsProfile,
+      evals: {
+        ...genericDocsProfile.evals,
+        goldenSetPath: path.join(tempDir, "golden.jsonl"),
+        adversarialSetPath: path.join(tempDir, "adversarial.jsonl"),
+        requiredChecks: [
+          ...genericDocsProfile.evals.requiredChecks,
+          "query_planning",
+          "evidence_strategy"
+        ]
+      }
+    };
+
+    const suite = await runProfileEvalSuite({ profile, projectRoot: process.cwd() });
+
+    assert.equal(suite.passed, true, suite.failures.join("\n"));
+    assert.equal(suite.coveredChecks.includes("query_planning"), true);
+    assert.equal(suite.coveredChecks.includes("evidence_strategy"), true);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("runtime evals can enforce extraction quality", async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "rag-evals-"));
   try {
@@ -206,7 +272,14 @@ test("runtime evals can enforce extraction quality", async () => {
         ...genericDocsProfile.evals,
         goldenSetPath: path.join(tempDir, "golden.jsonl"),
         adversarialSetPath: path.join(tempDir, "adversarial.jsonl"),
-        requiredChecks: [...genericDocsProfile.evals.requiredChecks, "extraction_quality"]
+        requiredChecks: [
+          "retrieval_recall",
+          "citation_required",
+          "refusal_when_unsupported",
+          "access_boundary",
+          "prompt_injection_resistance",
+          "extraction_quality"
+        ]
       }
     };
 
@@ -263,7 +336,14 @@ test("runtime evals fail extraction quality for missing or invented relationship
         ...genericDocsProfile.evals,
         goldenSetPath: path.join(tempDir, "golden.jsonl"),
         adversarialSetPath: path.join(tempDir, "adversarial.jsonl"),
-        requiredChecks: [...genericDocsProfile.evals.requiredChecks, "extraction_quality"]
+        requiredChecks: [
+          "retrieval_recall",
+          "citation_required",
+          "refusal_when_unsupported",
+          "access_boundary",
+          "prompt_injection_resistance",
+          "extraction_quality"
+        ]
       }
     };
 
@@ -296,7 +376,14 @@ test("runtime evals can enforce relationship claim grounding from a JSONL knowle
         ...genericDocsProfile.evals,
         goldenSetPath: path.join(tempDir, "golden.jsonl"),
         adversarialSetPath: path.join(tempDir, "adversarial.jsonl"),
-        requiredChecks: [...genericDocsProfile.evals.requiredChecks, "relationship_claim_grounding"]
+        requiredChecks: [
+          "retrieval_recall",
+          "citation_required",
+          "refusal_when_unsupported",
+          "access_boundary",
+          "prompt_injection_resistance",
+          "relationship_claim_grounding"
+        ]
       }
     };
 
@@ -728,6 +815,47 @@ function extractionQualityEvalCase(
       retrievedDocumentIds: [`${id}_ownership_doc`],
       minimumCitations: 1,
       requiredContextStatus: "answerable"
+    }
+  };
+}
+
+function queryPlanningEvalCase(id: string, expectOverrides: Record<string, unknown> = {}): unknown {
+  return {
+    id,
+    checks: ["retrieval_recall", "citation_required", "query_planning", "evidence_strategy"],
+    query: "What is the latest API timeout error issue?",
+    principal: evalPrincipal(),
+    corpus: [
+      {
+        ...evalCorpusBase(
+          `${id}_support_doc`,
+          "Support Incident",
+          "Latest support incident: API timeout errors were resolved by increasing the upstream retry budget."
+        ),
+        capturedAt: "2026-06-22T00:00:00.000Z"
+      },
+      {
+        ...evalCorpusBase(
+          `${id}_older_support_doc`,
+          "Older Support Incident",
+          "Latest support incident: API timeout errors were investigated before the retry budget change."
+        ),
+        capturedAt: "2026-01-01T00:00:00.000Z"
+      }
+    ],
+    expect: {
+      status: "succeeded",
+      retrievedDocumentIds: [`${id}_support_doc`],
+      minimumCitations: 1,
+      requiredContextStatus: "answerable",
+      requiredPrimaryIntent: "freshness",
+      requiredSecondaryIntents: ["troubleshooting"],
+      requiredSourceHints: ["recent", "support"],
+      requiredAdaptiveRetryStrategy: "freshness_expansion",
+      requiredAdaptiveDiagnosisCode: "freshness_requested",
+      requiredFreshnessTraceApplied: true,
+      minimumFreshnessBoostedCandidates: 1,
+      ...expectOverrides
     }
   };
 }

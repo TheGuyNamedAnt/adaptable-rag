@@ -16,6 +16,8 @@ import type { CorpusRecord, CorpusRecordMetadata } from "./corpus-record.js";
 import { redactDiagnosticMessage } from "./structured-record-mapper.js";
 
 export const LOCAL_FILES_ADAPTER_ID = "local-files";
+export const DEFAULT_LOCAL_FILES_PARSER_CONCURRENCY = 1;
+export const MAX_LOCAL_FILES_PARSER_CONCURRENCY = 32;
 
 export type LocalFilesParserMode = "auto" | "disabled";
 
@@ -119,6 +121,7 @@ export interface LocalFilesSourceConfig {
   readonly parserMode?: LocalFilesParserMode;
   readonly parserId?: string;
   readonly parserRequireLayout?: boolean;
+  readonly parserConcurrency?: number;
   readonly sourceKind?: SourceKind;
   readonly trustTier?: TrustTier;
   readonly sensitivity?: SourceSensitivity;
@@ -154,6 +157,11 @@ interface FileTypeDetection {
 interface RawTextBody {
   readonly body: string;
   readonly metadata?: CorpusRecordMetadata;
+}
+
+interface FileRecordResult {
+  readonly record?: CorpusRecord;
+  readonly warnings: readonly CorpusAdapterWarning[];
 }
 
 export class LocalFilesCorpusAdapter implements CorpusAdapter {
@@ -203,12 +211,32 @@ export class LocalFilesCorpusAdapter implements CorpusAdapter {
     }
 
     const files = await discoverFiles(config, root, request.source.id, warnings);
+    const parserConcurrency = parserConcurrencyForSource(config);
     const records: CorpusRecord[] = [];
+    const fileResults: readonly FileRecordResult[] = await mapWithConcurrency(
+      files,
+      parserConcurrency,
+      async (file) => {
+        const fileWarnings: CorpusAdapterWarning[] = [];
+        const record = await recordFromFile(
+          config,
+          request,
+          root,
+          file,
+          this.parsers,
+          fileWarnings
+        );
+        return {
+          ...(record === undefined ? {} : { record }),
+          warnings: fileWarnings
+        };
+      }
+    );
 
-    for (const file of files) {
-      const record = await recordFromFile(config, request, root, file, this.parsers, warnings);
-      if (record) {
-        records.push(record);
+    for (const result of fileResults) {
+      warnings.push(...result.warnings);
+      if (result.record) {
+        records.push(result.record);
       }
     }
 
@@ -218,6 +246,46 @@ export class LocalFilesCorpusAdapter implements CorpusAdapter {
       warnings
     };
   }
+}
+
+async function mapWithConcurrency<T, R extends object>(
+  items: readonly T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<R>
+): Promise<readonly R[]> {
+  if (items.length === 0) {
+    return [];
+  }
+
+  const results: R[] = [];
+  let nextIndex = 0;
+  const workerCount = Math.min(concurrency, items.length);
+
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      for (;;) {
+        const index = nextIndex;
+        nextIndex += 1;
+        if (index >= items.length) {
+          return;
+        }
+
+        const item = items[index];
+        if (item === undefined) {
+          throw new Error("Local file concurrency scheduler encountered a missing file entry.");
+        }
+        results[index] = await worker(item, index);
+      }
+    })
+  );
+
+  return Array.from({ length: items.length }, (_value, index) => {
+    const result = results[index];
+    if (result === undefined) {
+      throw new Error("Local file concurrency scheduler did not produce a result.");
+    }
+    return result;
+  });
 }
 
 async function resolveRoot(
@@ -1024,11 +1092,16 @@ function parserForFile(input: {
     return undefined;
   }
 
-  return [...input.parsers.values()].find(
-    (parser) =>
-      supportsParserContentType(parser, contentType) &&
-      parserWithinByteLimit(parser, input.fileSizeBytes)
-  );
+  return [...input.parsers.values()]
+    .filter(
+      (parser) =>
+        supportsParserContentType(parser, contentType) &&
+        parserWithinByteLimit(parser, input.fileSizeBytes)
+    )
+    .sort(
+      (first, second) =>
+        parserSpecificity(second, contentType) - parserSpecificity(first, contentType)
+    )[0];
 }
 
 function supportsParserContentType(parser: DocumentParser, contentType: string): boolean {
@@ -1043,6 +1116,22 @@ function parserWithinByteLimit(parser: DocumentParser, fileSizeBytes: number): b
   return (
     parser.capabilities.maxBytes === undefined || fileSizeBytes <= parser.capabilities.maxBytes
   );
+}
+
+function parserSpecificity(parser: DocumentParser, contentType: string): number {
+  const supported = parser.capabilities.supportedContentTypes ?? [];
+  const exactMatch = supported.includes(contentType) ? 100 : 0;
+  const wildcardMatch = supported.some(
+    (candidate) => candidate.endsWith("/*") && contentType.startsWith(candidate.slice(0, -1))
+  )
+    ? 50
+    : 0;
+  const openEnded = supported.length === 0 ? 10 : 0;
+  const capabilityScore =
+    (parser.capabilities.emitsLayout ? 5 : 0) +
+    (parser.capabilities.emitsTables ? 3 : 0) +
+    (parser.capabilities.emitsVisualAssets ? 2 : 0);
+  return exactMatch + wildcardMatch + openEnded + capabilityScore;
 }
 
 function parserWarningForFile(
@@ -1308,10 +1397,29 @@ function sourceConfigMap(
       throw new Error(`Duplicate local file source config "${config.sourceId}".`);
     }
 
+    parserConcurrencyForSource(config);
     map.set(config.sourceId, config);
   }
 
   return map;
+}
+
+function parserConcurrencyForSource(config: LocalFilesSourceConfig): number {
+  if (config.parserConcurrency === undefined) {
+    return DEFAULT_LOCAL_FILES_PARSER_CONCURRENCY;
+  }
+
+  if (
+    !Number.isInteger(config.parserConcurrency) ||
+    config.parserConcurrency < 1 ||
+    config.parserConcurrency > MAX_LOCAL_FILES_PARSER_CONCURRENCY
+  ) {
+    throw new Error(
+      `Local file source config "${config.sourceId}" parserConcurrency must be an integer between 1 and ${MAX_LOCAL_FILES_PARSER_CONCURRENCY}.`
+    );
+  }
+
+  return config.parserConcurrency;
 }
 
 function parserMap(parsers: readonly DocumentParser[]): ReadonlyMap<string, DocumentParser> {

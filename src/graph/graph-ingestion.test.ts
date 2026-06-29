@@ -37,7 +37,7 @@ const profile = assertValidProfile({
 });
 
 test("graph ingestion runner extracts and writes validated graph proposals", async () => {
-  const document = makeDocument();
+  const document = makeDocument({ body: "Parent LLC owns Child LLC." });
   const chunks = makeChunks(document);
   const graphStore = new InMemoryGraphStore();
   const runner = new GraphIngestionRunner({
@@ -56,6 +56,8 @@ test("graph ingestion runner extracts and writes validated graph proposals", asy
   });
 
   assert.equal(result.status, "succeeded");
+  assert.equal(result.graphIntegrity?.valid, true);
+  assert.equal(result.trace.graphIntegrityStatus, "passed");
   assert.equal(result.trace.entityCount, 2);
   assert.equal(result.trace.relationCount, 1);
   assert.equal(result.trace.storedEntityCount, 2);
@@ -69,7 +71,7 @@ test("graph ingestion runner extracts and writes validated graph proposals", asy
 });
 
 test("graph ingestion runner can auto-approve stored graph proposals", async () => {
-  const document = makeDocument();
+  const document = makeDocument({ body: "Parent LLC owns Child LLC." });
   const chunks = makeChunks(document);
   const graphStore = new InMemoryGraphStore();
   const runner = new GraphIngestionRunner({
@@ -93,6 +95,7 @@ test("graph ingestion runner can auto-approve stored graph proposals", async () 
   });
 
   assert.equal(result.status, "succeeded");
+  assert.equal(result.graphIntegrity?.valid, true);
   assert.equal(result.approval?.approvedCount, 3);
   assert.equal(result.trace.approvalDecisionCount, 3);
   assert.equal(result.trace.approvedCount, 3);
@@ -316,6 +319,45 @@ test("graph ingestion runner fails soft when extraction fails and does not write
 
   assert.equal(result.status, "failed");
   assert.equal(result.trace.extractionStatus, "failed");
+  assert.deepEqual(
+    graphStore.findRelations({ filter: makeIndexFilter(), includeUnapproved: true }),
+    []
+  );
+});
+
+test("graph ingestion runner fails before writing or approving ungrounded graph facts", async () => {
+  const document = makeDocument({
+    body: "Parent LLC and Child LLC appear in the annual report."
+  });
+  const chunks = makeChunks(document);
+  const graphStore = new InMemoryGraphStore();
+  const runner = new GraphIngestionRunner({
+    extractor: fakeExtractor((request) => successResult(request, makeBatch(request))),
+    graphStore,
+    approvalRunner: new GraphApprovalRunner({ graphStore, now: () => FIXED_NOW }),
+    now: () => FIXED_NOW
+  });
+
+  const result = await runner.ingest({
+    profile,
+    ontology: ownershipGraphOntology,
+    documents: [document],
+    chunks,
+    approvalFilter: makeIndexFilter(),
+    ingestionId: "graph_ingest_integrity_failure",
+    requestedAt: FIXED_NOW
+  });
+
+  assert.equal(result.status, "failed");
+  assert.equal(result.graphIntegrity?.valid, false);
+  assert.equal(result.trace.graphIntegrityStatus, "failed");
+  assert.equal(result.trace.graphIntegrityErrorCount, 1);
+  assert.equal(result.storeWrite, undefined);
+  assert.equal(result.approval, undefined);
+  assert.deepEqual(
+    result.graphIntegrity?.errors.map((issue) => issue.code),
+    ["relation_kind_not_grounded"]
+  );
   assert.deepEqual(
     graphStore.findRelations({ filter: makeIndexFilter(), includeUnapproved: true }),
     []

@@ -87,6 +87,15 @@ export interface ContextBudget {
   readonly isolateSourceDocuments: boolean;
 }
 
+export type RetrievalSourceRouteMode = "filter" | "prefer";
+
+export interface RetrievalSourceHintRoute {
+  readonly mode: RetrievalSourceRouteMode;
+  readonly sourceIds?: readonly string[];
+  readonly sourceKinds?: readonly SourceKind[];
+  readonly trustTiers?: readonly TrustTier[];
+}
+
 export interface FreshnessPolicy {
   readonly mode: FreshnessMode;
   readonly maxSourceAgeDays?: number;
@@ -156,6 +165,7 @@ export interface RagProfile {
     readonly rerankMode: RerankMode;
     readonly preferSourceTags?: readonly string[];
     readonly avoidSourceTagsUnlessNeeded?: readonly string[];
+    readonly sourceHintRoutes?: Readonly<Record<string, RetrievalSourceHintRoute>>;
   };
   readonly contextBudget: ContextBudget;
   readonly freshnessPolicy: FreshnessPolicy;

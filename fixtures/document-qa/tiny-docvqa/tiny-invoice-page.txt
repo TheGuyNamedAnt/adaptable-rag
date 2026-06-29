@@ -1,0 +1,4 @@
+Invoice ACME-100
+Billing period: June 2026
+Invoice total due: $42.50
+Payment terms: due on receipt

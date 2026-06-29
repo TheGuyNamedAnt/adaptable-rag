@@ -165,6 +165,25 @@ create table if not exists rag_core.ingestion_document_progress (
   chunk_count integer not null default 0 check (chunk_count >= 0),
   retryable boolean not null default false,
   attempt integer not null default 1 check (attempt > 0),
+  failure_stage text check (
+    failure_stage is null or
+    failure_stage in (
+      'queued',
+      'loading_source',
+      'normalizing',
+      'parsing',
+      'chunking',
+      'embedding',
+      'indexing',
+      'graph_extracting',
+      'completed',
+      'completed_with_warnings',
+      'failed',
+      'cancelled',
+      'visual_embedding'
+    )
+  ),
+  failure_phase text,
   started_at timestamptz,
   finished_at timestamptz,
   updated_at timestamptz not null,
@@ -247,6 +266,16 @@ create index if not exists rag_chunks_fts_idx
 
 create index if not exists rag_chunk_vectors_scope_idx
   on rag_core.chunk_vectors (tenant_id, namespace_id);
+
+create index if not exists rag_chunk_vectors_identity_idx
+  on rag_core.chunk_vectors (
+    tenant_id,
+    namespace_id,
+    dimensions,
+    embedding_model,
+    (metadata->>'embeddingProvider'),
+    (metadata->>'embeddingConfigHash')
+  );
 
 create index if not exists rag_chunk_vectors_chunk_idx
   on rag_core.chunk_vectors (chunk_id);

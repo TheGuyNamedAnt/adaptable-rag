@@ -23,6 +23,12 @@ test("company deployment smoke script gates packs, sync, self-test, and writes a
   assert.equal(summary.status, "passed");
   assert.equal(summary.companyDeployment.companyId, "acme");
   assert.equal(summary.companyDeployment.useCaseId, "support");
+  assert.equal(summary.companyDeployment.moduleExportName, "acmeSupportDeployment");
+  assert.equal(summary.companyDeployment.companyExportPath, "acmeSupportDeployment.company");
+  assert.deepEqual(summary.companyDeployment.adapterPackExports, [
+    "acmeSupportDeployment.adapterPacks"
+  ]);
+  assert.deepEqual(summary.companyDeployment.environment.requiredEnv, ["RAG_DATABASE_URL"]);
   assert.equal(summary.gates.packContracts.status, "passed");
   assert.equal(summary.gates.sync.status, "passed");
   assert.equal(summary.gates.sync.syncStatus, "succeeded");
@@ -70,10 +76,6 @@ function spawnCompanySmoke(extraArgs: readonly string[]) {
       "scripts/run-company-deployment-smoke.mjs",
       "--module",
       "dist/company/examples/acme-support.company.js",
-      "--export",
-      "acmeSupportCompanyProfile",
-      "--adapter-pack-export",
-      "acmeSupportAdapterPack",
       "--use-case",
       "support",
       ...extraArgs

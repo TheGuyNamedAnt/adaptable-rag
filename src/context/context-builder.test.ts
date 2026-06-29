@@ -526,6 +526,40 @@ test("rejects candidates missing required freshness metadata", async () => {
   assert.equal(result.trace.rejectionCodes.includes("missing_freshness_metadata"), true);
 });
 
+test("freshness query intent rejects missing capturedAt even when profile freshness is disabled", async () => {
+  const retrieval = await retrieveDocuments([
+    withoutCapturedAt(
+      makeDocument({
+        id: "doc_missing_query_freshness",
+        body: "Latest refund policy from missing freshness metadata."
+      })
+    )
+  ]);
+  const builder = new ContextBuilder({ now: () => FIXED_NOW });
+
+  const result = builder.build({
+    profile: profileForTest({
+      freshnessPolicy: {
+        mode: "none",
+        requireCapturedAt: false
+      }
+    }),
+    retrieval,
+    queryIntent: {
+      primary: "freshness",
+      sourceHints: ["recent"]
+    },
+    includeRejected: true
+  });
+
+  assert.equal(result.blocks.length, 0);
+  assert.equal(result.rejected[0]?.code, "missing_freshness_metadata");
+  assert.equal(
+    result.rejected[0]?.reason,
+    "Chunk source is missing capturedAt required by the freshness query intent."
+  );
+});
+
 test("rejects candidates older than the freshness age budget", async () => {
   const stale = makeDocument({
     id: "doc_stale",
@@ -556,6 +590,55 @@ test("rejects candidates older than the freshness age budget", async () => {
   assert.equal(result.blocks.length, 0);
   assert.equal(result.rejected[0]?.code, "stale_source");
   assert.equal(result.trace.rejectionCodes.includes("stale_source"), true);
+});
+
+test("freshness query intent prefers newer sources even when profile recency preference is disabled", async () => {
+  const older = makeDocument({
+    id: "doc_older",
+    body: "Latest refund policy older source."
+  });
+  const newer = makeDocument({
+    id: "doc_newer",
+    body: "Latest refund policy newer source."
+  });
+  const retrieval = await retrieveDocuments([
+    {
+      ...older,
+      provenance: {
+        ...older.provenance,
+        capturedAt: "2026-01-01T00:00:00.000Z"
+      }
+    },
+    {
+      ...newer,
+      provenance: {
+        ...newer.provenance,
+        capturedAt: "2026-06-20T00:00:00.000Z"
+      }
+    }
+  ]);
+  const builder = new ContextBuilder({ now: () => FIXED_NOW });
+
+  const result = builder.build({
+    profile: profileForTest({
+      contextBudget: {
+        ...genericDocsProfile.contextBudget,
+        preferTrustedSources: false,
+        preferRecentSources: false
+      },
+      freshnessPolicy: {
+        mode: "none",
+        requireCapturedAt: false
+      }
+    }),
+    retrieval,
+    queryIntent: {
+      primary: "freshness",
+      sourceHints: ["recent"]
+    }
+  });
+
+  assert.equal(result.blocks[0]?.documentId, "doc_newer");
 });
 
 test("deduplicates duplicate retrieval candidates", async () => {

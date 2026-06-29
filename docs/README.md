@@ -6,7 +6,9 @@ short; detailed architecture and operations material lives here or under `deploy
 ## Start Here
 
 - [Full reference](full-reference.md): the original long-form architecture and operations reference.
+- [Parser and document QA benchmarks](parser-benchmarks.md): parser metrics plus DocVQA/ChartQA-style RAG QA scoring.
 - [Deployment guide](../deploy/README.md): Docker, env, provider, hosted vector, and production notes.
+- [Parser benchmarks](parser-benchmarks.md): external parser benchmark loaders, runner, and current metrics.
 - [Company production runbook](../deploy/company-production-runbook.md): Postgres/pgvector company deployment flow.
 - [Company connector template](../templates/company-connector-pack/): copyable company integration skeleton.
 - [Project support connector template](../templates/project-support-connector/): copyable support-event exporter skeleton.

@@ -34,6 +34,11 @@ import {
   makeIndexFilter,
   TEST_PRINCIPAL
 } from "../test-support/fixtures.js";
+import {
+  InMemoryIngestionCheckpointStore,
+  InMemoryIngestionJobStore,
+  InMemoryIngestionProgressStore
+} from "./ingestion-job.js";
 import { SourceSyncWorkflowRunner } from "./source-sync-workflow.js";
 
 const source: CorpusSourceConfig = {
@@ -90,6 +95,9 @@ test("source sync workflow propagates deletes, ingests changed records, and save
   index.addDocument(deletedDocument);
   index.addChunks(deletedDocument.id, makeChunks(deletedDocument));
   const ledgerStore = new InMemorySourceSyncLedgerStore();
+  const jobStore = new InMemoryIngestionJobStore();
+  const checkpointStore = new InMemoryIngestionCheckpointStore();
+  const progressStore = new InMemoryIngestionProgressStore();
   const connector = new FixtureSourceConnector([
     {
       sourceId: source.id,
@@ -116,6 +124,9 @@ test("source sync workflow propagates deletes, ingests changed records, and save
     ledgerStore,
     documentStore: index,
     chunkStore: index,
+    jobStore,
+    checkpointStore,
+    progressStore,
     now: () => FIXED_NOW
   });
 
@@ -150,11 +161,47 @@ test("source sync workflow propagates deletes, ingests changed records, and save
       ["source_item_fresh", "active", "created"]
     ]
   );
+  const job = await jobStore.get("workflow_success_ingest");
+  assert.equal(job?.status, "completed");
+  assert.equal(job?.stage, "completed");
+  assert.equal(job?.counts?.documentsAccepted, 1);
+  assert.equal(job?.counts?.chunksAccepted, 1);
+  assert.equal(job?.counts?.recordsRejected, 0);
+  assert.equal(
+    (await checkpointStore.list("workflow_success_ingest")).some(
+      (checkpoint) => checkpoint.checkpoint["phase"] === "document_indexed"
+    ),
+    true
+  );
+  assert.deepEqual(await progressStore.listSources("workflow_success_ingest"), [
+    {
+      jobId: "workflow_success_ingest",
+      sourceId: source.id,
+      status: "completed",
+      loadedDocumentCount: 1,
+      acceptedDocumentCount: 1,
+      failedDocumentCount: 0,
+      skippedDocumentCount: 0,
+      startedAt: FIXED_NOW,
+      finishedAt: FIXED_NOW,
+      updatedAt: FIXED_NOW
+    }
+  ]);
+  assert.deepEqual(
+    (await progressStore.listDocuments("workflow_success_ingest")).map((document) => [
+      document.documentId,
+      document.status
+    ]),
+    [["doc_fresh", "accepted"]]
+  );
 });
 
 test("source sync workflow does not save a success ledger when ingestion rejects changed records", async () => {
   const index = new InMemoryRagIndex({ now: () => FIXED_NOW });
   const ledgerStore = new InMemorySourceSyncLedgerStore();
+  const jobStore = new InMemoryIngestionJobStore();
+  const checkpointStore = new InMemoryIngestionCheckpointStore();
+  const progressStore = new InMemoryIngestionProgressStore();
   const connector = new FixtureSourceConnector([
     {
       sourceId: source.id,
@@ -177,6 +224,9 @@ test("source sync workflow does not save a success ledger when ingestion rejects
     ledgerStore,
     documentStore: index,
     chunkStore: index,
+    jobStore,
+    checkpointStore,
+    progressStore,
     now: () => FIXED_NOW
   });
 
@@ -203,6 +253,34 @@ test("source sync workflow does not save a success ledger when ingestion rejects
       namespaceId: profile.namespaceId
     }),
     undefined
+  );
+  const job = await jobStore.get("workflow_rejected_ingest");
+  assert.equal(job?.status, "failed");
+  assert.equal(job?.counts?.recordsRejected, 1);
+  assert.equal(
+    (await checkpointStore.list("workflow_rejected_ingest")).some(
+      (checkpoint) => checkpoint.checkpoint["phase"] === "completed"
+    ),
+    true
+  );
+  assert.deepEqual(
+    (await progressStore.listSources("workflow_rejected_ingest")).map((record) => [
+      record.status,
+      record.loadedDocumentCount,
+      record.acceptedDocumentCount,
+      record.failedDocumentCount
+    ]),
+    [["failed", 1, 0, 1]]
+  );
+  assert.deepEqual(
+    (await progressStore.listDocuments("workflow_rejected_ingest")).map((document) => [
+      document.documentId,
+      document.status,
+      document.retryable,
+      document.failureStage,
+      document.failurePhase
+    ]),
+    [["doc_bad", "failed", false, "normalizing", "normalizing_rejected_record"]]
   );
 });
 

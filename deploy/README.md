@@ -24,6 +24,12 @@ For company deployments, use Postgres with pgvector instead of JSON files. Apply
 ```bash
 psql "$RAG_DATABASE_URL" -f deploy/postgres/001_core_storage.sql
 psql "$RAG_DATABASE_URL" -f deploy/postgres/002_vector_hnsw_1536.sql
+psql "$RAG_DATABASE_URL" -f deploy/postgres/003_ingestion_failure_stage.sql
+psql "$RAG_DATABASE_URL" -f deploy/postgres/004_admin_trace_history.sql
+psql "$RAG_DATABASE_URL" -f deploy/postgres/005_admin_connector_state.sql
+psql "$RAG_DATABASE_URL" -f deploy/postgres/006_admin_review_queue.sql
+psql "$RAG_DATABASE_URL" -f deploy/postgres/007_ingestion_scale_queue.sql
+psql "$RAG_DATABASE_URL" -f deploy/postgres/008_index_generation_promotions.sql
 ```
 
 Then configure the app:
@@ -38,7 +44,13 @@ RAG_DATABASE_URL=postgres://rag:replace_me@postgres:5432/rag
 RAG_POSTGRES_SCHEMA=rag_core
 ```
 
-The Postgres index stores normalized documents and chunks as JSONB with queryable tenant, namespace, source, trust, safety, access-tag, and weighted full-text columns. The same database stores text embeddings in `rag_core.chunk_vectors` through pgvector, so production hybrid retrieval can run as Postgres FTS plus pgvector without JSON snapshots or a separate hosted vector service.
+The Postgres index stores normalized documents and chunks as JSONB with queryable tenant, namespace, source, trust, safety, access-tag, and weighted full-text columns. The same database stores text embeddings in `rag_core.chunk_vectors` through pgvector, including an embedding identity filter index on tenant, namespace, dimensions, model, provider, and config hash. Production hybrid retrieval can run as Postgres FTS plus pgvector without JSON snapshots or a separate hosted vector service.
+
+Admin trace history uses `rag_core.admin_answer_runs` when the admin app is configured with Postgres trace history. It persists redacted answer-run artifacts, queryable run metadata, citation counts, rejection codes, and safe trace payloads without storing raw questions, generated answer text, evidence summaries, source bodies, prompts, credentials, or full principal claims.
+
+Admin connector state uses `rag_core.admin_connector_actions` and `rag_core.admin_connector_disabled_overrides` when the admin app is configured with Postgres connector state. It persists sync/retry/disable/re-enable action metadata, safe CLI args, run ids, source ids, status, counts, and disabled overrides without storing connector source bodies, cursors, credentials, provider payloads, or full principal claims. Without Postgres config the admin app falls back to local `.rag/admin-connectors` JSON files for development.
+
+Admin review workflow uses `rag_core.admin_review_states` when the admin app is configured with Postgres review state. It persists only queue item ids, review status, owner, bounded operator note, acknowledgement timestamp, and update actor, without duplicating document bodies, prompts, answer text, provider payloads, connector content, or retrieved evidence. Without Postgres config the admin app falls back to local `.rag/admin-review` JSON files for development.
 
 Use `deploy/company-production.example.env` as the safe starting env template for this target. It sets `RAG_INDEX_KIND=postgres`, `RAG_VECTOR_KIND=postgres`, `RAG_SOURCE_SYNC_LEDGER_KIND=postgres`, required text embeddings, required grounding judge config, HTTP auth/rate limits, and company pack-contract enforcement. The full command sequence lives in `deploy/company-production-runbook.md`.
 
@@ -58,6 +70,107 @@ GitHub Actions includes the same storage gate in `.github/workflows/company-post
 
 Production ingestion also writes durable run state to `rag_core.ingestion_jobs`. Each job records the tenant, namespace, source ids, status, current stage, checkpoint payload, safe counts, and redacted error fields. Reusing a failed `runId` resumes from completed source/document checkpoints in that durable record; reusing a completed `runId` starts a fresh replace-style pass through the same job id. An already running job is rejected so two workers do not silently race on the same ingest run.
 
+Distributed ingestion workers use `rag_core.ingestion_queue` and
+`rag_core.ingestion_leases`, which are created by
+`deploy/postgres/007_ingestion_scale_queue.sql`. First enqueue bounded batches
+from the same compiled CLI:
+
+```bash
+node dist/runtime/production-cli.js enqueue-ingestion \
+  --plan-id backfill_acme_support_20260624 \
+  --tenant-id tenant_acme \
+  --namespace-id acme-support \
+  --source-id support_docs \
+  --batch-size 10 \
+  --priority 5 \
+  --metadata reason=quarterly_backfill
+```
+
+For embedding or chunking migrations, use `--mode reindex` with an explicit
+candidate generation manifest. `--dry-run true` prints the planned queue jobs
+and promotion plan without writing queue rows.
+
+Then run bounded workers:
+
+```bash
+node dist/runtime/production-cli.js worker \
+  --max-jobs 10 \
+  --worker-id worker_acme_1 \
+  --tenant-id tenant_acme \
+  --namespace-id acme-support \
+  --principal-namespace-id acme-support \
+  --user-id ingestion_worker \
+  --role ingestion-worker \
+  --overwrite replace
+```
+
+The enqueue command writes safe queue metadata only. The worker command claims
+queued jobs, keeps queue/source leases alive, runs the production ingest runtime,
+and completes, retries, or dead-letters the queue item. Its JSON output is a
+safe operational summary and omits raw documents and chunks.
+
+Queue control commands use the same safe summary shape:
+
+```bash
+node dist/runtime/production-cli.js inspect-ingestion-queue \
+  --tenant-id tenant_acme \
+  --namespace-id acme-support \
+  --status dead_letter \
+  --limit 20
+node dist/runtime/production-cli.js cancel-ingestion-queue-job \
+  --queue-id backfill_acme_support_20260624_queue_4 \
+  --reason "Duplicate backfill request"
+node dist/runtime/production-cli.js requeue-ingestion-queue-job \
+  --queue-id backfill_acme_support_20260624_queue_5 \
+  --available-at 2026-06-24T12:00:00.000Z \
+  --max-attempts 3 \
+  --reason "Provider recovered" \
+  --metadata operator=search-team
+```
+
+Cancellation is limited to queued or leased jobs. Requeue is limited to
+dead-letter jobs, resets attempts, preserves the last error fields, and records
+bounded requeue metadata.
+
+Candidate index generations and promotion gates are persisted in
+`rag_core.index_generation_manifests` and `rag_core.index_generation_promotions`,
+created by `deploy/postgres/008_index_generation_promotions.sql`. Store the
+candidate manifest, required eval ids, eval results, and promotion record before
+switching traffic. The schema enforces only one active generation per
+tenant/namespace so distributed workers cannot silently split reads across two
+active vector generations.
+
+Use the generation promotion commands as the cutover control plane:
+
+```bash
+node dist/runtime/production-cli.js plan-generation-promotion \
+  --promotion-id promote_acme_support_20260624 \
+  --tenant-id tenant_acme \
+  --namespace-id acme-support \
+  --profile-id acme-support-profile \
+  --generation-id gen_acme_support_20260624 \
+  --embedding-provider openai \
+  --embedding-model text-embedding-3-large \
+  --embedding-dimensions 3072 \
+  --embedding-config-hash replace_with_candidate_embedding_hash \
+  --embedding-index-config-hash replace_with_candidate_index_hash \
+  --chunking-policy-id default \
+  --chunking-policy-version 2 \
+  --required-eval-id retrieval_regression \
+  --required-eval-id citation_regression
+node dist/runtime/production-cli.js record-generation-eval \
+  --promotion-id promote_acme_support_20260624 \
+  --eval-id retrieval_regression \
+  --eval-status passed \
+  --report-uri s3://rag-evals/acme/retrieval-regression.json
+node dist/runtime/production-cli.js promote-generation \
+  --promotion-id promote_acme_support_20260624
+```
+
+`promote-generation` refuses to switch active generation until all required eval
+ids have a passing result. Use `inspect-index-generations` and
+`inspect-generation-promotion` during rollout reviews.
+
 Incremental source connectors should persist their sync ledger in Postgres through `PostgresSourceSyncLedgerStore`. The core schema includes `rag_core.source_sync_ledgers` for the current safe ledger JSON and `rag_core.source_sync_ledger_entries` for queryable source item state, including active records, deleted tombstones, failed retry state, safe hashes, and cursors. These tables are the production basis for delta syncs and delete propagation without reloading entire company sources.
 
 Connector integrations should use `createProductionSourceSyncRuntime({ app, connector })`. The runtime pulls the production chunk store, vector store, visual vector store, source-sync ledger store, embedding adapters, and graph delete-pruning store from the assembled app, then runs delta/full sync, delete propagation, ingestion, post-ingest indexing, and safe ledger saves through one path.
@@ -71,8 +184,7 @@ The packaged validator can run the same gate from a deployment module:
 ```bash
 npm run company:validate -- \
   --module dist/company/examples/acme-support.company.js \
-  --export acmeSupportCompanyProfile \
-  --adapter-pack-export acmeSupportAdapterPack \
+  --export acmeSupportDeployment \
   --run-pack-contracts \
   --use-case support \
   --principal-role support \
@@ -80,14 +192,15 @@ npm run company:validate -- \
   --report-dir .rag/company/acme-support
 ```
 
-Use `--adapter-pack-export` once per exported pack or export an array. If no `--use-case` is provided, the validator runs pack contracts for every company use case. Optional controls include `--contract-mode delta|full`, `--min-delta-returned-records`, `--allow-incomplete-full`, `--allow-open-acl`, `--disallow-connector-warnings`, `--contract-requested-at`, and principal flags for user, tenant, namespace, team, role, and tag. The `company-pack-contracts.json` artifact includes issue codes and safe counts only; it does not include connector records, parser bodies, warning payloads, source bodies, credentials, or principal claims.
+Use `--adapter-pack-export` only for legacy profile-only modules or when intentionally overriding the manifest's packaged adapter packs. If no `--use-case` is provided, the validator runs pack contracts for every company use case. Optional controls include `--contract-mode delta|full`, `--min-delta-returned-records`, `--allow-incomplete-full`, `--allow-open-acl`, `--disallow-connector-warnings`, `--contract-requested-at`, and principal flags for user, tenant, namespace, team, role, and tag. The `company-pack-contracts.json` artifact includes issue codes and safe counts only; it does not include connector records, parser bodies, warning payloads, source bodies, credentials, or principal claims.
+
+For promotion gates, validate the full `CompanyDeploymentManifest` contract, not only the profile shape. The validator checks `environment.requiredEnv`, `evals.requiredPaths`, and smoke command fields. Add `--require-manifest-env` after loading the deployment env, add `--require-smoke-commands` when the company module must publish all smoke commands, and set `--manifest-root <repo-root>` when required eval paths should be resolved somewhere other than the current working directory.
 
 For production startup, point the compiled CLI at the same company module:
 
 ```text
 RAG_COMPANY_MODULE_PATH=dist/company/examples/acme-support.company.js
-RAG_COMPANY_PROFILE_EXPORT=acmeSupportCompanyProfile
-RAG_COMPANY_ADAPTER_PACK_EXPORTS=acmeSupportAdapterPack
+RAG_COMPANY_DEPLOYMENT_EXPORT=acmeSupportDeployment
 RAG_COMPANY_USE_CASE_ID=support
 RAG_COMPANY_PACK_CONTRACT_MODE=required
 ```
@@ -111,13 +224,40 @@ The CLI builds a `CompanyDeploymentRegistry`, selects the company use-case profi
 
 Use `sync --mode delta` for normal incremental company updates. Use `sync --mode full` for first import, repair, or reconciliation; full sync tombstones previous ledger items that the complete connector result no longer lists unless `--delete-missing false` is supplied. Sync output is redacted to counts, statuses, warning codes, and ledger-save state; it does not include connector records, document bodies, chunk text, cursors, source ACL payloads, credentials, or principal claims.
 
+For admin/debug inspection, use the same compiled CLI. Durable ingestion inspection requires the Postgres storage target because job progress is production metadata:
+
+```bash
+node dist/runtime/production-cli.js inspect-ingestion-jobs \
+  --tenant-id tenant_acme \
+  --namespace-id acme-support \
+  --limit 20
+node dist/runtime/production-cli.js inspect-ingestion-job \
+  --job-id company_sync_20260624 \
+  --source-id support_docs \
+  --document-status failed \
+  --document-limit 50
+node dist/runtime/production-cli.js inspect-source-health \
+  --job-id company_sync_20260624 \
+  --source-id support_docs
+```
+
+File-backed inspection works on safe artifacts and does not require Postgres job state:
+
+```bash
+node dist/runtime/production-cli.js inspect-trace --trace .rag/eval-runs/latest/trace.json
+node dist/runtime/production-cli.js inspect-retrieval --retrieval .rag/eval-runs/latest/retrieval.json
+node dist/runtime/production-cli.js inspect-citation \
+  --trace .rag/eval-runs/latest/trace.json \
+  --context .rag/eval-runs/latest/context.json
+node dist/runtime/production-cli.js inspect-eval-failure --summary .rag/eval-runs/latest/summary.json
+```
+
 Run the whole company deployment gate as one repeatable smoke before promotion:
 
 ```bash
 npm run company:smoke -- \
   --module dist/company/examples/acme-support.company.js \
-  --export acmeSupportCompanyProfile \
-  --adapter-pack-export acmeSupportAdapterPack \
+  --export acmeSupportDeployment \
   --use-case support \
   --source-id support_docs \
   --env-file deploy/company-production.env \
@@ -128,7 +268,7 @@ The smoke loads the compiled company module, runs pack contracts, runs `sync --m
 
 Use `templates/company-connector-pack/` for a copyable company integration skeleton. It includes a company profile, adapter pack, source connector, corpus adapter, permission mapper, starter eval JSONL, and a pack contract test that can be kept in the company deployment repo. The fixture shows delta cursor handoff, complete full-sync behavior, tombstone-safe deletes, and redacted ACL fingerprints.
 
-`002_vector_hnsw_1536.sql` is dimension-specific. If the embedding provider uses a dimension other than `1536`, copy that migration and replace `1536` with the configured `RAG_VECTOR_DIMENSIONS` value. `validate-config --self-test true` fails Postgres vector readiness when the pgvector extension, core tables, FTS index, dimensions, or dimension-specific ANN index are missing.
+`002_vector_hnsw_1536.sql` is dimension-specific. If the embedding provider uses a dimension other than `1536`, copy that migration and replace `1536` with the configured `RAG_VECTOR_DIMENSIONS` value. `validate-config --self-test true` fails Postgres vector readiness when the pgvector extension, core tables, FTS index, embedding identity filter index, dimensions, or dimension-specific ANN index are missing.
 
 ## Startup Validation
 
@@ -264,6 +404,21 @@ The runner writes `ledger.json`, `feedback.json`, and `ledger.md` to `.rag/revie
 
 Ledger artifacts do not include raw user questions, source bodies, rendered context, generated answer text, bearer tokens, API keys, routing keys, full principal claims, or un-hashed reviewer identifiers.
 
+## Admin Review Workflow Export
+
+The admin UI review queue stores live operator workflow decisions in admin metadata. Export those decisions before syncing them to an external ticket system:
+
+```bash
+npm run review:admin-export
+node scripts/export-admin-review-workflow.mjs \
+  --admin-url http://127.0.0.1:8788 \
+  --report-dir .rag/admin-review-export/latest
+```
+
+The exporter calls `/api/rag/review/export` and writes `export.json`, `tickets.json`, and `export.md` to `.rag/admin-review-export/latest`. The `tickets.json` file uses the same generic review ticket payload shape as the batch review ledger flow, so it can be passed directly to review ticket sync.
+
+Admin review export artifacts include queue item ids, workflow status, owner/reviewer hashes, bounded operator notes, safe queue facts, counts, timestamps, and ticket payloads. They do not include document bodies, prompts, generated answer text, provider payloads, credentials, full principal claims, raw connector content, or raw reviewer identifiers.
+
 ## Review Ticket Sync
 
 After the queue and ledger exist, dry-run external ticket sync:
@@ -273,6 +428,15 @@ npm run review:sync
 node scripts/sync-review-tickets.mjs \
   --queue .rag/human-review/latest/queue.json \
   --ledger .rag/review-ledger/latest/ledger.json \
+  --report-dir .rag/review-sync/latest \
+  --mode dry-run
+```
+
+To sync tickets exported from the admin UI workflow instead, pass the prebuilt ticket payloads:
+
+```bash
+node scripts/sync-review-tickets.mjs \
+  --tickets .rag/admin-review-export/latest/tickets.json \
   --report-dir .rag/review-sync/latest \
   --mode dry-run
 ```
@@ -419,7 +583,7 @@ node dist/runtime/production-cli.js ingest \
 
 The command writes through `IngestPipeline` only: adapter load, corpus normalization, document store write, chunking, chunk store write, and optional embedding/vector indexing. Its output is a redacted operational summary with counts and warnings; it does not echo document bodies, chunk text, bearer tokens, provider secrets, or principal claims.
 
-Project-specific one-off adapters are registered in code through `adapterExtensions`. For reusable company deployments, use `RAG_COMPANY_MODULE_PATH` plus `RAG_COMPANY_ADAPTER_PACK_EXPORTS` so the compiled CLI can load a trusted company module, validate the pack, and inject only the selected use case's adapters and parsers. The core runtime still rejects unknown adapter IDs, duplicate extension IDs, and attempts to override built-in adapters such as `local-files` or `approved_knowledge_artifact` before indexing begins.
+Project-specific one-off adapters are registered in code through `adapterExtensions`. For reusable company deployments, use `RAG_COMPANY_MODULE_PATH` plus `RAG_COMPANY_DEPLOYMENT_EXPORT` so the compiled CLI can load one trusted company manifest, validate the packaged packs, and inject only the selected use case's adapters and parsers. `RAG_COMPANY_ADAPTER_PACK_EXPORTS` remains available for legacy profile-only modules and explicit pack overrides. The core runtime still rejects unknown adapter IDs, duplicate extension IDs, and attempts to override built-in adapters such as `local-files` or `approved_knowledge_artifact` before indexing begins.
 
 Before registering a custom adapter, run `assertCorpusAdapterContract()` in the project adapter test suite. The contract test loads the adapter against a real profile source, checks warning redaction, and runs returned records through the same normalization rules used by production ingestion.
 
@@ -427,26 +591,34 @@ Visual ingestion is separate from text embeddings. Set `RAG_VISUAL_VECTOR_KIND=j
 
 ## Answer Request
 
+Production deployments should use `RAG_PRINCIPAL_MODE=signed_header`. In that mode the caller
+still sends `tenantId` and `namespaceId`, but the user principal comes from an identity gateway
+header signed with `RAG_PRINCIPAL_SIGNING_SECRET`; the request body cannot choose its own roles,
+teams, tags, or user id.
+
+Set `RAG_PRINCIPAL_MAX_AGE_MS` in production so signed headers expire quickly. Set
+`RAG_PRINCIPAL_ISSUER` when the identity gateway has a stable issuer name; then payloads must
+include the same `issuer` plus a fresh ISO `issuedAt`.
+
 ```bash
+PRINCIPAL_PAYLOAD="$(node -e 'const payload={principal:{userId:"user_1",tenantId:"tenant_1",namespaceIds:["generic-docs"],teamIds:[],roles:["reader"],tags:["trusted"]},issuer:"identity-gateway",issuedAt:new Date().toISOString()}; process.stdout.write(Buffer.from(JSON.stringify(payload)).toString("base64url"));')"
+PRINCIPAL_SIGNATURE="$(PRINCIPAL_PAYLOAD="$PRINCIPAL_PAYLOAD" node -e 'const crypto=require("node:crypto"); process.stdout.write(crypto.createHmac("sha256", process.env.RAG_PRINCIPAL_SIGNING_SECRET).update(process.env.PRINCIPAL_PAYLOAD).digest("hex"));')"
+
 curl -X POST http://127.0.0.1:8787/answer \
   -H "authorization: Bearer ${RAG_HTTP_AUTH_TOKEN}" \
+  -H "x-rag-principal: ${PRINCIPAL_PAYLOAD}" \
+  -H "x-rag-principal-signature: sha256=${PRINCIPAL_SIGNATURE}" \
   -H 'content-type: application/json' \
   -d '{
     "question": "What is the refund policy?",
     "tenantId": "tenant_1",
-    "namespaceId": "generic-docs",
-    "principal": {
-      "userId": "user_1",
-      "tenantId": "tenant_1",
-      "namespaceIds": ["generic-docs"],
-      "teamIds": [],
-      "roles": [],
-      "tags": []
-    }
+    "namespaceId": "generic-docs"
   }'
 ```
 
-The service refuses broad implicit access. Each request must pass HTTP bearer auth and provide tenant, namespace, and principal scope.
+The service refuses broad implicit access. Each request must pass HTTP bearer auth, provide tenant
+and namespace scope, and resolve a verified principal. `RAG_PRINCIPAL_MODE=request_body` remains
+available for local development and internal test harnesses only.
 
 ## Secrets
 
@@ -464,9 +636,11 @@ HTTP edge auth uses the same pattern:
 ```text
 RAG_HTTP_AUTH_TOKEN_ENV=RAG_HTTP_AUTH_TOKEN
 RAG_HTTP_AUTH_TOKEN=replace_me_with_high_entropy_token
+RAG_PRINCIPAL_SIGNING_SECRET_ENV=RAG_PRINCIPAL_SIGNING_SECRET
+RAG_PRINCIPAL_SIGNING_SECRET=replace_me_with_identity_gateway_hmac_secret
 ```
 
-The loaded app config stores SHA-256 token hashes, not the raw token. Use a high-entropy token from your secret manager. Set `RAG_HTTP_AUTH_MODE=disabled` only for local trusted development.
+The loaded app config stores SHA-256 bearer token hashes, not the raw bearer token. Principal signing secrets stay in memory because the service must verify HMAC signatures. Use high-entropy values from your secret manager. Set `RAG_HTTP_AUTH_MODE=disabled` only for local trusted development.
 
 ## Rate Limiting
 

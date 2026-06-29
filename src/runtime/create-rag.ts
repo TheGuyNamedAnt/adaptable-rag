@@ -225,6 +225,7 @@ export interface PlugAndPlayRag {
   agent(input: RagLocalAgentInput): Promise<RagAgentResult>;
   ingest(input: RagLocalIngestInput): Promise<RagLocalIngestResponse>;
   health(): ProductionRagHealth;
+  healthAsync(): Promise<ProductionRagHealth>;
   selfTest(options?: StartupSelfTestOptions): Promise<StartupSelfTestResult>;
 }
 
@@ -329,6 +330,8 @@ export function createRag(options: CreateRagOptions): PlugAndPlayRag {
       };
     },
     health: () => app.health(),
+    healthAsync: () =>
+      app.healthAsync === undefined ? Promise.resolve(app.health()) : app.healthAsync(),
     selfTest: (selfTestOptions) => app.selfTest(selfTestOptions)
   };
 }

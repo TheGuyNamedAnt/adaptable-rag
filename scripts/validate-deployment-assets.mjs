@@ -19,6 +19,32 @@ const files = {
   companyProductionExample: read(path.join("deploy", "company-production.example.env")),
   companyProductionRunbook: read(path.join("deploy", "company-production-runbook.md")),
   postgresCompose: read(path.join("deploy", "postgres", "docker-compose.pgvector.yml")),
+  postgresCoreStorage: read(path.join("deploy", "postgres", "001_core_storage.sql")),
+  postgresGenerationPromotions: read(
+    path.join("deploy", "postgres", "008_index_generation_promotions.sql")
+  ),
+  adminIndexGenerationRoute: read(
+    path.join("admin", "src", "app", "api", "rag", "index-generations", "route.ts")
+  ),
+  adminGenerationPromotionRoute: read(
+    path.join(
+      "admin",
+      "src",
+      "app",
+      "api",
+      "rag",
+      "generation-promotions",
+      "[promotionId]",
+      "route.ts"
+    )
+  ),
+  adminGenerationPromotionActionsRoute: read(
+    path.join("admin", "src", "app", "api", "rag", "generation-promotions", "actions", "route.ts")
+  ),
+  adminQualityOpsPage: read(path.join("admin", "src", "app", "quality-ops", "page.tsx")),
+  adminGenerationPromotionPanel: read(
+    path.join("admin", "src", "components", "GenerationPromotionPanel.tsx")
+  ),
   projectSupportConnectorReadme: read(
     path.join("templates", "project-support-connector", "README.md")
   ),
@@ -102,7 +128,7 @@ const checks = [
   check(
     "Env example documents company deployment module config",
     files.envExample.includes("RAG_COMPANY_MODULE_PATH") &&
-      files.envExample.includes("RAG_COMPANY_ADAPTER_PACK_EXPORTS") &&
+      files.envExample.includes("RAG_COMPANY_DEPLOYMENT_EXPORT") &&
       files.envExample.includes("RAG_COMPANY_PACK_CONTRACT_MODE")
   ),
   check("Env example uses durable index path", envValue("RAG_INDEX_PATH") === "/data/index.json"),
@@ -216,6 +242,11 @@ const checks = [
       "npm run build && node scripts/build-review-ledger.mjs --queue .rag/human-review/latest/queue.json --report-dir .rag/review-ledger/latest"
   ),
   check(
+    "Package exposes admin review workflow export script",
+    files.packageJson.scripts?.["review:admin-export"] ===
+      "node scripts/export-admin-review-workflow.mjs --report-dir .rag/admin-review-export/latest"
+  ),
+  check(
     "Package exposes review ticket sync script",
     files.packageJson.scripts?.["review:sync"] ===
       "npm run build && node scripts/sync-review-tickets.mjs --queue .rag/human-review/latest/queue.json --ledger .rag/review-ledger/latest/ledger.json --report-dir .rag/review-sync/latest --mode dry-run"
@@ -290,7 +321,7 @@ const checks = [
     "Deployment docs mention adapter extension and company module registration",
     files.deployReadme.includes("adapterExtensions") &&
       files.deployReadme.includes("RAG_COMPANY_MODULE_PATH") &&
-      files.deployReadme.includes("RAG_COMPANY_ADAPTER_PACK_EXPORTS") &&
+      files.deployReadme.includes("RAG_COMPANY_DEPLOYMENT_EXPORT") &&
       files.deployReadme.includes("unknown adapter IDs")
   ),
   check(
@@ -355,24 +386,52 @@ const checks = [
       envValueFrom(files.companyProductionExample, "RAG_VECTOR_KIND") === "postgres" &&
       envValueFrom(files.companyProductionExample, "RAG_SOURCE_SYNC_LEDGER_KIND") === "postgres" &&
       envValueFrom(files.companyProductionExample, "RAG_POSTGRES_URL_ENV") === "RAG_DATABASE_URL" &&
+      envValueFrom(files.companyProductionExample, "RAG_ADMIN_TRACE_HISTORY_KIND") === "postgres" &&
+      envValueFrom(files.companyProductionExample, "RAG_ADMIN_TRACE_POSTGRES_URL_ENV") ===
+        "RAG_DATABASE_URL" &&
+      envValueFrom(files.companyProductionExample, "RAG_ADMIN_CONNECTOR_STATE_KIND") ===
+        "postgres" &&
+      envValueFrom(files.companyProductionExample, "RAG_ADMIN_CONNECTOR_POSTGRES_URL_ENV") ===
+        "RAG_DATABASE_URL" &&
+      envValueFrom(files.companyProductionExample, "RAG_ADMIN_REVIEW_STATE_KIND") === "postgres" &&
+      envValueFrom(files.companyProductionExample, "RAG_ADMIN_REVIEW_POSTGRES_URL_ENV") ===
+        "RAG_DATABASE_URL" &&
       envValueFrom(files.companyProductionExample, "RAG_VECTOR_DIMENSIONS") === "1536" &&
       envValueFrom(files.companyProductionExample, "RAG_APP_EMBEDDING_MODE") === "required" &&
       envValueFrom(files.companyProductionExample, "RAG_APP_GROUNDING_JUDGE_MODE") === "required" &&
       envValueFrom(files.companyProductionExample, "RAG_COMPANY_PACK_CONTRACT_MODE") ===
         "required" &&
       files.companyProductionExample.includes("RAG_COMPANY_MODULE_PATH") &&
-      files.companyProductionExample.includes("RAG_COMPANY_ADAPTER_PACK_EXPORTS") &&
+      files.companyProductionExample.includes("RAG_COMPANY_DEPLOYMENT_EXPORT") &&
       !containsLiveSecret(files.companyProductionExample)
   ),
   check(
     "Deployment includes company production promotion runbook",
     files.companyProductionRunbook.includes("deploy/postgres/001_core_storage.sql") &&
       files.companyProductionRunbook.includes("deploy/postgres/002_vector_hnsw_1536.sql") &&
+      files.companyProductionRunbook.includes("deploy/postgres/003_ingestion_failure_stage.sql") &&
+      files.companyProductionRunbook.includes("deploy/postgres/004_admin_trace_history.sql") &&
+      files.companyProductionRunbook.includes("deploy/postgres/005_admin_connector_state.sql") &&
+      files.companyProductionRunbook.includes("deploy/postgres/006_admin_review_queue.sql") &&
+      files.companyProductionRunbook.includes("deploy/postgres/007_ingestion_scale_queue.sql") &&
+      files.companyProductionRunbook.includes(
+        "deploy/postgres/008_index_generation_promotions.sql"
+      ) &&
       files.companyProductionRunbook.includes("validate-config --self-test true") &&
       files.companyProductionRunbook.includes("npm run company:smoke") &&
       files.companyProductionRunbook.includes("npm run company:smoke:postgres") &&
       files.companyProductionRunbook.includes("--sync-mode full") &&
       files.companyProductionRunbook.includes("--sync-mode delta") &&
+      files.companyProductionRunbook.includes("enqueue-ingestion") &&
+      files.companyProductionRunbook.includes("worker_acme_1") &&
+      files.companyProductionRunbook.includes("inspect-ingestion-queue") &&
+      files.companyProductionRunbook.includes("cancel-ingestion-queue-job") &&
+      files.companyProductionRunbook.includes("requeue-ingestion-queue-job") &&
+      files.companyProductionRunbook.includes("plan-generation-promotion") &&
+      files.companyProductionRunbook.includes("record-generation-eval") &&
+      files.companyProductionRunbook.includes("inspect-generation-promotion") &&
+      files.companyProductionRunbook.includes("promote-generation") &&
+      files.companyProductionRunbook.includes("inspect-index-generations") &&
       files.companyProductionRunbook.includes(".rag/company-smoke/latest/smoke.json") &&
       files.companyProductionRunbook.includes(
         ".rag/company-postgres-smoke/latest/postgres-company-smoke.json"
@@ -387,6 +446,42 @@ const checks = [
       files.postgresCompose.includes("54329:5432") &&
       files.postgresCompose.includes("pg_isready") &&
       files.postgresCompose.includes("rag_pgvector_data")
+  ),
+  check(
+    "Postgres vector schema includes embedding identity filter index",
+    files.postgresCoreStorage.includes("rag_chunk_vectors_identity_idx") &&
+      files.postgresCoreStorage.includes("(metadata->>'embeddingProvider')") &&
+      files.postgresCoreStorage.includes("(metadata->>'embeddingConfigHash')")
+  ),
+  check(
+    "Postgres generation promotion schema enforces one active generation per scope",
+    files.postgresGenerationPromotions.includes("index_generation_manifests") &&
+      files.postgresGenerationPromotions.includes("index_generation_promotions") &&
+      files.postgresGenerationPromotions.includes("where status = 'active'")
+  ),
+  check(
+    "Deployment docs mention generation promotion control commands",
+    files.deployReadme.includes("plan-generation-promotion") &&
+      files.deployReadme.includes("record-generation-eval") &&
+      files.deployReadme.includes("promote-generation") &&
+      files.deployReadme.includes("inspect-index-generations") &&
+      files.deployReadme.includes("inspect-generation-promotion")
+  ),
+  check(
+    "Admin API exposes generation promotion control plane",
+    files.adminIndexGenerationRoute.includes("getIndexGenerations") &&
+      files.adminGenerationPromotionRoute.includes("getGenerationPromotion") &&
+      files.adminGenerationPromotionActionsRoute.includes("planGenerationPromotion") &&
+      files.adminGenerationPromotionActionsRoute.includes("recordGenerationEval") &&
+      files.adminGenerationPromotionActionsRoute.includes("promoteGeneration")
+  ),
+  check(
+    "Admin UI exposes generation promotion control plane",
+    files.adminQualityOpsPage.includes("GenerationPromotionPanel") &&
+      files.adminQualityOpsPage.includes("getIndexGenerations") &&
+      files.adminGenerationPromotionPanel.includes("/api/rag/generation-promotions/actions") &&
+      files.adminGenerationPromotionPanel.includes("record_eval") &&
+      files.adminGenerationPromotionPanel.includes("Promote")
   ),
   check(
     "Deployment docs mention operations endpoints",
@@ -439,6 +534,13 @@ const checks = [
       files.deployReadme.includes(".rag/review-ledger/latest") &&
       files.deployReadme.includes("ledger.json") &&
       files.deployReadme.includes("feedback.json")
+  ),
+  check(
+    "Deployment docs mention admin review workflow export reports",
+    files.deployReadme.includes("npm run review:admin-export") &&
+      files.deployReadme.includes(".rag/admin-review-export/latest") &&
+      files.deployReadme.includes("export.json") &&
+      files.deployReadme.includes("/api/rag/review/export")
   ),
   check(
     "Deployment docs mention review ticket sync reports",
@@ -509,7 +611,11 @@ const checks = [
       files.companyConnectorPackReadme.includes("--run-pack-contracts") &&
       files.companyConnectorPackReadme.includes("--min-delta-returned-records") &&
       files.companyConnectorPackReadme.includes("profiles/company-docs/docs/*.jsonl") &&
+      files.companyConnectorPackReadme.includes("CompanyDeploymentManifest") &&
       files.companyConnectorPackProfile.includes("export const companyProfile") &&
+      files.companyConnectorPackProfile.includes("export const companyDeployment") &&
+      files.companyConnectorPackProfile.includes("requiredEnv") &&
+      files.companyConnectorPackProfile.includes("postgresSmokeCommand") &&
       files.companyConnectorPackProfile.includes("permissionMapping") &&
       files.companyConnectorPackProfile.includes("--contract-mode delta") &&
       files.companyConnectorPackProfile.includes("--contract-mode full")

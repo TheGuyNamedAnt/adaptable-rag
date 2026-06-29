@@ -86,6 +86,96 @@ test("parser router falls back when the fast parser does not satisfy quality", a
   ]);
 });
 
+test("parser router can require layout only for selected content types", async () => {
+  const fast = fakeParser("fast", { body: "native text" });
+  const layout = fakeParser("layout", { body: "layout text", layout: layoutFixture() });
+  const router = new DocumentParserRouter({
+    candidates: [
+      { parser: fast, tier: "fast_native" },
+      { parser: layout, tier: "layout_local" }
+    ],
+    policy: {
+      requireLayoutContentTypes: [
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+      ]
+    }
+  });
+
+  const docxResult = await router.parse({
+    ...request,
+    contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+  });
+  const textResult = await router.parse({ ...request, contentType: "text/plain" });
+
+  assert.equal(docxResult.document.metadata?.["parserRouterSelectedParserId"], "layout");
+  assert.equal(docxResult.document.metadata?.["parserRouterRejectedAttemptCount"], 1);
+  assert.equal(textResult.document.metadata?.["parserRouterSelectedParserId"], "fast");
+});
+
+test("parser router treats table preference as scoring, not a hard requirement", async () => {
+  const fast = fakeParser("fast", { body: "Investor | Shares\nAcme LLC | 100" });
+  const table = fakeParser("table", { body: "layout text", layout: tableLayoutFixture() });
+  const router = new DocumentParserRouter({
+    candidates: [
+      { parser: fast, tier: "fast_native" },
+      { parser: table, tier: "layout_local" }
+    ],
+    policy: { preferTables: true }
+  });
+
+  const result = await router.parse(request);
+
+  assert.equal(result.document.metadata?.["parserRouterSelectedParserId"], "table");
+  assert.equal(fast.parseCount, 1);
+  assert.equal(table.parseCount, 1);
+  const trace = parserRouterTrace(result);
+  assert.deepEqual(
+    trace.attempts.map(
+      (attempt) => `${attempt.parserId}:${attempt.status}:${attempt.qualityScore}`
+    ),
+    ["fast:accepted:92", "table:accepted:100"]
+  );
+});
+
+test("parser router returns best available parse when soft preferences cannot be satisfied", async () => {
+  const flattenedTable = "Balance Sheet\nCash,Debt,Equity\n10,2,8\n20,3,17";
+  const fast = fakeParser("fast", { body: flattenedTable });
+  const fallback = fakeParser("fallback", { body: flattenedTable });
+  const router = new DocumentParserRouter({
+    candidates: [
+      { parser: fast, tier: "fast_native" },
+      { parser: fallback, tier: "fallback" }
+    ],
+    policy: { preferTables: true }
+  });
+
+  const result = await router.parse(request);
+
+  assert.equal(result.document.metadata?.["parserRouterSelectedParserId"], "fast");
+  assert.equal(result.document.metadata?.["parserRouterSelectedScore"], 92);
+  assert.equal(fast.parseCount, 1);
+  assert.equal(fallback.parseCount, 1);
+});
+
+test("parser router does not chase table preference for non-table content", async () => {
+  const fast = fakeParser("fast", { body: "native text without a table" });
+  const fallback = fakeParser("fallback", { body: "fallback text" });
+  const router = new DocumentParserRouter({
+    candidates: [
+      { parser: fast, tier: "fast_native" },
+      { parser: fallback, tier: "fallback" }
+    ],
+    policy: { preferTables: true }
+  });
+
+  const result = await router.parse(request);
+
+  assert.equal(result.document.metadata?.["parserRouterSelectedParserId"], "fast");
+  assert.equal(result.document.metadata?.["parserRouterSelectedScore"], 100);
+  assert.equal(fast.parseCount, 1);
+  assert.equal(fallback.parseCount, 0);
+});
+
 test("parser router skips paid cloud candidates unless policy allows them", async () => {
   const paid = fakeParser("paid", { body: "cloud text", layout: layoutFixture() });
   const fallback = fakeParser("fallback", { body: "fallback text" });
@@ -178,7 +268,8 @@ test("parser router records failed parser attempts without leaking raw error tex
   assert.equal(result.document.metadata?.["parserRouterSelectedParserId"], "fallback");
   assert.equal(result.document.metadata?.["parserRouterFailedAttemptCount"], 1);
   assert.equal(result.warnings[0]?.code, "parser_router_attempt_failed");
-  assert.match(result.warnings[0]?.message ?? "", /token=secret/u);
+  assert.equal((result.warnings[0]?.message ?? "").includes("token=secret"), false);
+  assert.match(result.warnings[0]?.message ?? "", /token=\[REDACTED\]/u);
 
   const traceJson = String(result.document.metadata?.["parserRouterTraceJson"]);
   assert.equal(traceJson.includes("token=secret"), false);
@@ -186,11 +277,89 @@ test("parser router records failed parser attempts without leaking raw error tex
   assert.deepEqual(trace.attempts[0]?.reasons, ["parser failed during parse with Error"]);
 });
 
+test("parser router rejects parserFailed fallback results even when body is present", async () => {
+  const failedFallback = fakeParser("failed-fallback", {
+    body: "fallback body from failed parser",
+    metadata: { parserFailed: true, parserFailureCode: "command_layout_failed" }
+  });
+  const clean = fakeParser("clean", { body: "clean parser body" });
+  const router = new DocumentParserRouter({
+    candidates: [
+      { parser: failedFallback, tier: "layout_local" },
+      { parser: clean, tier: "fallback" }
+    ]
+  });
+
+  const result = await router.parse(request);
+
+  assert.equal(result.document.metadata?.["parserRouterSelectedParserId"], "clean");
+  assert.equal(result.document.metadata?.["parserRouterRejectedAttemptCount"], 1);
+  assert.equal(result.warnings[0]?.code, "parser_router_attempt_rejected");
+  const trace = parserRouterTrace(result);
+  assert.equal(trace.attempts[0]?.status, "rejected");
+  assert.equal(trace.attempts[0]?.parserFailed, true);
+  assert.equal(trace.attempts[0]?.qualityScore, 40);
+  assert.deepEqual(trace.attempts[0]?.reasons, ["parser reported failure"]);
+});
+
+test("parser router treats image placeholders as empty body text", async () => {
+  const placeholder = fakeParser("placeholder-layout", {
+    body: "<!-- image -->",
+    layout: imagePlaceholderLayout()
+  });
+  const ocr = fakeParser("ocr", { body: "ocr text", layout: layoutFixture() });
+  const router = new DocumentParserRouter({
+    candidates: [
+      { parser: placeholder, tier: "layout_local" },
+      { parser: ocr, tier: "visual_local" }
+    ]
+  });
+  const result = await router.parse({
+    sourceId: request.sourceId,
+    sourceKind: request.sourceKind,
+    title: "scan.png",
+    contentType: "image/png",
+    bytes: new Uint8Array([1, 2, 3]),
+    requestedAt
+  });
+
+  assert.equal(result.document.metadata?.["parserRouterSelectedParserId"], "ocr");
+  assert.equal(result.document.metadata?.["parserRouterRejectedAttemptCount"], 1);
+  const trace = parserRouterTrace(result);
+  assert.equal(trace.attempts[0]?.bodyCharacters, 0);
+  assert.deepEqual(trace.attempts[0]?.reasons, ["body had 0 character(s), below 1"]);
+});
+
+test("parser router accepts visual-only image parses when a visual asset is emitted", async () => {
+  const visualOnly = fakeParser("visual-only-layout", {
+    body: "<!-- image -->",
+    layout: imageVisualAssetLayout()
+  });
+  const router = new DocumentParserRouter({
+    candidates: [{ parser: visualOnly, tier: "layout_local", requireLayout: true }]
+  });
+  const result = await router.parse({
+    sourceId: request.sourceId,
+    sourceKind: request.sourceKind,
+    title: "scan.png",
+    contentType: "image/png",
+    bytes: new Uint8Array([1, 2, 3]),
+    requestedAt
+  });
+
+  assert.equal(result.document.metadata?.["parserRouterSelectedParserId"], "visual-only-layout");
+  const trace = parserRouterTrace(result);
+  assert.equal(trace.attempts[0]?.status, "accepted");
+  assert.equal(trace.attempts[0]?.bodyCharacters, 0);
+  assert.equal(trace.attempts[0]?.visualAssetCount, 1);
+});
+
 function fakeParser(
   id: string,
   options: {
     readonly body: string;
     readonly layout?: DocumentLayout;
+    readonly metadata?: Readonly<Record<string, string | number | boolean>>;
     readonly capabilities?: Partial<DocumentParserCapabilities>;
   }
 ): DocumentParser & { readonly parseCount: number } {
@@ -215,6 +384,7 @@ function fakeParser(
         parserId: id,
         document: {
           body: options.body,
+          ...(options.metadata === undefined ? {} : { metadata: options.metadata }),
           ...(options.layout === undefined ? {} : { layout: options.layout })
         },
         warnings: []
@@ -272,5 +442,54 @@ function layoutFixture(): DocumentLayout {
     ],
     tables: [],
     visualAssets: []
+  };
+}
+
+function tableLayoutFixture(): DocumentLayout {
+  return {
+    ...layoutFixture(),
+    regions: [
+      {
+        id: "table_region",
+        kind: "table",
+        pageNumber: 1,
+        text: "layout text",
+        characterStart: 0,
+        characterEnd: 11
+      }
+    ],
+    tables: [{ id: "table_1", pageNumber: 1, regionId: "table_region", cells: [] }]
+  };
+}
+
+function imagePlaceholderLayout(): DocumentLayout {
+  return {
+    parserId: "image-placeholder",
+    strategy: "visual_page",
+    pages: [{ pageNumber: 1, width: 160, height: 100, unit: "pixel" }],
+    regions: [
+      {
+        id: "page_image_1",
+        kind: "page_image",
+        pageNumber: 1
+      }
+    ],
+    tables: [],
+    visualAssets: []
+  };
+}
+
+function imageVisualAssetLayout(): DocumentLayout {
+  return {
+    ...imagePlaceholderLayout(),
+    visualAssets: [
+      {
+        id: "page_image_asset",
+        kind: "page_image",
+        pageNumber: 1,
+        mediaType: "image/png",
+        uri: "file:///tmp/scan.png"
+      }
+    ]
   };
 }

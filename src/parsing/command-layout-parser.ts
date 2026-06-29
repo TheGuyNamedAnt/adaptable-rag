@@ -9,6 +9,7 @@ import type {
   DocumentParserCapabilities,
   DocumentParserWarning
 } from "./parser.js";
+import { safeParserDiagnosticMessage, sanitizeParserWarning } from "./parser-diagnostics.js";
 
 export interface CommandLayoutParserCommand {
   readonly executable: string;
@@ -23,6 +24,8 @@ export interface CommandLayoutParserOptions {
   readonly parserVersion?: string;
   readonly description?: string;
   readonly supportedContentTypes?: readonly string[];
+  readonly emitsTables?: boolean;
+  readonly emitsVisualAssets?: boolean;
   readonly maxBytes?: number;
   readonly runner?: CommandLayoutParserRunner;
 }
@@ -76,8 +79,8 @@ export class CommandLayoutParser implements DocumentParser {
     this.capabilities = {
       inputMode: "text_or_binary",
       emitsLayout: true,
-      emitsTables: true,
-      emitsVisualAssets: true,
+      emitsTables: options.emitsTables ?? true,
+      emitsVisualAssets: options.emitsVisualAssets ?? true,
       ...(options.supportedContentTypes === undefined
         ? {}
         : { supportedContentTypes: options.supportedContentTypes }),
@@ -112,7 +115,7 @@ export class CommandLayoutParser implements DocumentParser {
     } catch (error) {
       return fallbackResult(this, request, {
         code: "command_layout_failed",
-        message: error instanceof Error ? error.message : String(error)
+        message: safeParserDiagnosticMessage(error)
       });
     }
   }
@@ -196,7 +199,12 @@ function fallbackResult(
     parserVersion: parser.version,
     document: {
       body: request.text ?? "",
-      ...(request.metadata === undefined ? {} : { metadata: request.metadata })
+      metadata: {
+        ...(request.metadata ?? {}),
+        parserFailed: true,
+        parserFailureCode: warning.code,
+        parserFailureMessage: warning.message
+      }
     },
     warnings: [warning]
   };
@@ -215,11 +223,11 @@ function readWarnings(value: unknown): readonly DocumentParserWarning[] {
       return [];
     }
     return [
-      {
+      sanitizeParserWarning({
         code: item["code"],
         message: item["message"],
         ...(typeof item["path"] === "string" ? { path: item["path"] } : {})
-      }
+      })
     ];
   });
 }

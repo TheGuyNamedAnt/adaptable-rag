@@ -99,8 +99,18 @@ try {
       profileId: assembly.resolution.profile.id,
       namespaceId: assembly.resolution.profile.namespaceId,
       moduleUrl: loaded.moduleUrl,
+      moduleExportName: loaded.moduleExportName,
       companyExportName: loaded.companyExportName,
-      adapterPackExports: loaded.adapterPackExportNames
+      companyExportPath: loaded.companyExportPath,
+      ...(loaded.deploymentExportName === undefined
+        ? {}
+        : { deploymentExportName: loaded.deploymentExportName }),
+      adapterPackExports: loaded.adapterPackExportNames,
+      ...(loaded.environment === undefined
+        ? {}
+        : { environment: safeEnvironmentManifest(loaded.environment) }),
+      ...(loaded.evals === undefined ? {} : { evals: safeEvalManifest(loaded.evals) }),
+      ...(loaded.smoke === undefined ? {} : { smoke: safeSmokeManifest(loaded.smoke) })
     },
     gates,
     failures
@@ -141,7 +151,7 @@ try {
 function parseArgs(args) {
   const options = {
     modulePath: "dist/company/examples/acme-support.company.js",
-    exportName: "acmeSupportCompanyProfile",
+    exportName: "acmeSupportDeployment",
     adapterPackExportNames: [],
     connectorIds: [],
     sourceIds: [],
@@ -270,7 +280,7 @@ function companyCliEnv(input) {
   return {
     ...input.env,
     RAG_COMPANY_MODULE_PATH: input.options.modulePath,
-    RAG_COMPANY_PROFILE_EXPORT: input.options.exportName,
+    RAG_COMPANY_DEPLOYMENT_EXPORT: input.options.exportName,
     ...(input.loaded.adapterPackExportNames.length === 0
       ? {}
       : { RAG_COMPANY_ADAPTER_PACK_EXPORTS: input.loaded.adapterPackExportNames.join(",") }),
@@ -540,6 +550,40 @@ function booleanValue(value, flag) {
     return false;
   }
   throw new Error(`${flag} must be true or false.`);
+}
+
+function safeEnvironmentManifest(environment) {
+  return {
+    requiredEnv: safeStringArray(environment.requiredEnv),
+    optionalEnv: safeStringArray(environment.optionalEnv)
+  };
+}
+
+function safeEvalManifest(evals) {
+  return {
+    requiredPaths: safeStringArray(evals.requiredPaths),
+    goldenSetPaths: safeStringArray(evals.goldenSetPaths),
+    adversarialSetPaths: safeStringArray(evals.adversarialSetPaths)
+  };
+}
+
+function safeSmokeManifest(smoke) {
+  return {
+    ...(smoke.validateCommand === undefined
+      ? {}
+      : { validateCommand: safeText(smoke.validateCommand) }),
+    ...(smoke.packContractsCommand === undefined
+      ? {}
+      : { packContractsCommand: safeText(smoke.packContractsCommand) }),
+    ...(smoke.smokeCommand === undefined ? {} : { smokeCommand: safeText(smoke.smokeCommand) }),
+    ...(smoke.postgresSmokeCommand === undefined
+      ? {}
+      : { postgresSmokeCommand: safeText(smoke.postgresSmokeCommand) })
+  };
+}
+
+function safeStringArray(values) {
+  return (values ?? []).map((value) => safeText(value));
 }
 
 function safeText(value) {

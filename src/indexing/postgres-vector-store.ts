@@ -4,6 +4,11 @@ import pg from "pg";
 import type { ChunkStore } from "./chunk-store.js";
 import type { IndexOperationResult } from "./index-types.js";
 import { isValidIndexFilter } from "./index-filter.js";
+import type { VectorGenerationInventoryEntry } from "./vector-generation-lifecycle.js";
+import {
+  POSTGRES_VECTOR_SCALE_CAPABILITIES,
+  type VectorGenerationInventoryProvider
+} from "./scale-capabilities.js";
 import {
   type ChunkVector,
   type IndexedChunkVector,
@@ -42,7 +47,7 @@ type Queryable = Pick<Pool | PoolClient, "query">;
 
 const DEFAULT_SCHEMA = "rag_core";
 
-export class PostgresVectorStore implements VectorStore {
+export class PostgresVectorStore implements VectorStore, VectorGenerationInventoryProvider {
   readonly capabilities: VectorStoreCapabilities;
 
   private readonly chunkStore: ChunkStore;
@@ -75,6 +80,7 @@ export class PostgresVectorStore implements VectorStore {
       durable: true,
       enforcesAccessFilters: true,
       supportsCosineSimilarity: true,
+      scale: POSTGRES_VECTOR_SCALE_CAPABILITIES,
       ...(options.dimensions === undefined ? {} : { dimensions: options.dimensions })
     };
 
@@ -142,7 +148,7 @@ export class PostgresVectorStore implements VectorStore {
             vector.embeddingModel,
             vector.dimensions,
             vectorLiteral(vector.vector),
-            JSON.stringify(vector.metadata ?? {}),
+            JSON.stringify(metadataForStorage(vector)),
             vector.embeddedAt,
             existing?.indexedAt ?? indexedAt,
             existing ? indexedAt : null
@@ -195,6 +201,7 @@ export class PostgresVectorStore implements VectorStore {
     }
 
     const queryLimit = request.candidatePoolLimit ?? request.topK;
+    const maxLimit = Math.min(Math.max(queryLimit, request.topK), 5000);
     const result = await this.pool.query<PostgresVectorRow & { score: string | number }>(
       `select
         id, chunk_id, document_id, tenant_id, namespace_id, text_hash, embedding_model,
@@ -204,14 +211,20 @@ export class PostgresVectorStore implements VectorStore {
       where tenant_id = $2
         and namespace_id = $3
         and dimensions = $4
+        and ($5::text is null or embedding_model = $5)
+        and ($6::text is null or metadata->>'embeddingProvider' = $6)
+        and ($7::text is null or metadata->>'embeddingConfigHash' = $7)
       order by ${this.vectorExpression()} <=> ${this.queryVectorExpression("$1")} asc, id asc
-      limit $5`,
+      limit $8`,
       [
         vectorLiteral(request.vector),
         request.filter.tenantId,
         request.filter.namespaceId,
         request.vector.length,
-        Math.min(Math.max(queryLimit, request.topK), 5000)
+        request.embeddingModel ?? null,
+        request.embeddingProvider ?? null,
+        request.embeddingConfigHash ?? null,
+        maxLimit
       ]
     );
 
@@ -312,6 +325,51 @@ export class PostgresVectorStore implements VectorStore {
     return Number(result.rows[0]?.count ?? 0);
   }
 
+  async vectorGenerationInventory(): Promise<readonly VectorGenerationInventoryEntry[]> {
+    const result = await this.pool.query<{
+      tenant_id: string;
+      namespace_id: string;
+      embedding_provider: string | null;
+      embedding_model: string;
+      embedding_config_hash: string | null;
+      embedding_index_config_hash: string | null;
+      vector_count: string;
+      document_count: string;
+    }>(
+      `select
+        tenant_id,
+        namespace_id,
+        metadata->>'embeddingProvider' as embedding_provider,
+        embedding_model,
+        metadata->>'embeddingConfigHash' as embedding_config_hash,
+        metadata->>'embeddingIndexConfigHash' as embedding_index_config_hash,
+        count(*)::text as vector_count,
+        count(distinct document_id)::text as document_count
+      from ${this.q("chunk_vectors")}
+      group by
+        tenant_id,
+        namespace_id,
+        metadata->>'embeddingProvider',
+        embedding_model,
+        metadata->>'embeddingConfigHash',
+        metadata->>'embeddingIndexConfigHash'
+      order by tenant_id, namespace_id, embedding_provider, embedding_model, embedding_config_hash`
+    );
+
+    return result.rows.map((row) => ({
+      tenantId: row.tenant_id,
+      namespaceId: row.namespace_id,
+      embeddingProvider: row.embedding_provider ?? "unknown",
+      embeddingModel: row.embedding_model,
+      embeddingConfigHash: row.embedding_config_hash ?? "unknown",
+      ...(row.embedding_index_config_hash === null
+        ? {}
+        : { embeddingIndexConfigHash: row.embedding_index_config_hash }),
+      vectorCount: Number(row.vector_count),
+      documentCount: Number(row.document_count)
+    }));
+  }
+
   async readinessCheck(): Promise<PostgresVectorReadinessCheck> {
     const checks: PostgresVectorReadinessCheck["checks"][number][] = [];
     const extension = await this.pool.query<{ exists: boolean }>(
@@ -369,6 +427,30 @@ export class PostgresVectorStore implements VectorStore {
               id: "vector_dimensions",
               status: "failed",
               message: `${mismatchCount} stored vector(s) do not match configured dimensions ${this.dimensions}.`
+            }
+      );
+
+      const identityIndex = await this.pool.query<{ exists: boolean }>(
+        `select exists (
+          select 1 from pg_indexes
+          where schemaname = $1
+            and tablename = 'chunk_vectors'
+            and indexname = 'rag_chunk_vectors_identity_idx'
+        ) as exists`,
+        [this.schema]
+      );
+      checks.push(
+        identityIndex.rows[0]?.exists
+          ? {
+              id: "vector_identity_filter_index",
+              status: "passed",
+              message: "Vector identity filter index exists."
+            }
+          : {
+              id: "vector_identity_filter_index",
+              status: "failed",
+              message:
+                "Missing vector identity filter index. Apply the core Postgres storage migration before production traffic."
             }
       );
 
@@ -450,6 +532,9 @@ interface PostgresVectorRow {
 }
 
 function indexedVectorFromRow(row: PostgresVectorRow): IndexedChunkVector {
+  const embeddingProvider = stringMetadata(row.metadata, "embeddingProvider");
+  const embeddingConfigHash = stringMetadata(row.metadata, "embeddingConfigHash");
+
   return {
     vector: {
       id: row.id,
@@ -459,6 +544,8 @@ function indexedVectorFromRow(row: PostgresVectorRow): IndexedChunkVector {
       namespaceId: row.namespace_id,
       textHash: row.text_hash,
       embeddingModel: row.embedding_model,
+      ...(embeddingProvider === undefined ? {} : { embeddingProvider }),
+      ...(embeddingConfigHash === undefined ? {} : { embeddingConfigHash }),
       dimensions: row.dimensions,
       vector: parseVectorLiteral(row.vector),
       embeddedAt: dateString(row.embedded_at),
@@ -467,6 +554,26 @@ function indexedVectorFromRow(row: PostgresVectorRow): IndexedChunkVector {
     indexedAt: dateString(row.indexed_at),
     ...(row.updated_at === null ? {} : { updatedAt: dateString(row.updated_at) })
   };
+}
+
+function metadataForStorage(vector: ChunkVector): Record<string, string | number | boolean> {
+  return {
+    ...(vector.metadata ?? {}),
+    ...(vector.embeddingProvider === undefined
+      ? {}
+      : { embeddingProvider: vector.embeddingProvider }),
+    ...(vector.embeddingConfigHash === undefined
+      ? {}
+      : { embeddingConfigHash: vector.embeddingConfigHash })
+  };
+}
+
+function stringMetadata(
+  metadata: Readonly<Record<string, string | number | boolean>>,
+  key: string
+): string | undefined {
+  const value = metadata[key];
+  return typeof value === "string" && value.trim() ? value : undefined;
 }
 
 function vectorLiteral(vector: readonly number[]): string {

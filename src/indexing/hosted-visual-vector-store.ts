@@ -6,6 +6,7 @@ import type { ChunkStore } from "./chunk-store.js";
 import type { HostedVectorSearchMatch, HostedVectorStoreTransport } from "./hosted-vector-store.js";
 import { isValidIndexFilter } from "./index-filter.js";
 import type { IndexFilter, IndexOperationResult } from "./index-types.js";
+import { HOSTED_VECTOR_SCALE_CAPABILITIES } from "./scale-capabilities.js";
 import type { ChunkVector, ChunkVectorMetadata } from "./vector-store.js";
 import {
   type VisualChunkVector,
@@ -86,6 +87,7 @@ export class HostedVisualVectorStore implements VisualVectorStore {
       durable: true,
       enforcesAccessFilters: true,
       supportsLateInteraction: true,
+      scale: HOSTED_VECTOR_SCALE_CAPABILITIES,
       ...(options.dimensions === undefined ? {} : { dimensions: options.dimensions })
     };
 
@@ -153,6 +155,15 @@ export class HostedVisualVectorStore implements VisualVectorStore {
           tenantId: request.filter.tenantId,
           namespaceId: request.filter.namespaceId,
           topK: queryLimit,
+          ...(request.embeddingModel === undefined
+            ? {}
+            : { embeddingModel: request.embeddingModel }),
+          ...(request.embeddingProvider === undefined
+            ? {}
+            : { embeddingProvider: request.embeddingProvider }),
+          ...(request.embeddingConfigHash === undefined
+            ? {}
+            : { embeddingConfigHash: request.embeddingConfigHash }),
           ...(request.candidatePoolLimit === undefined
             ? {}
             : { candidatePoolLimit: request.candidatePoolLimit }),
@@ -247,6 +258,12 @@ function visualPatchVectors(vector: VisualChunkVector): readonly ChunkVector[] {
     namespaceId: vector.namespaceId,
     textHash: vector.textHash,
     embeddingModel: vector.embeddingModel,
+    ...(vector.embeddingProvider === undefined
+      ? {}
+      : { embeddingProvider: vector.embeddingProvider }),
+    ...(vector.embeddingConfigHash === undefined
+      ? {}
+      : { embeddingConfigHash: vector.embeddingConfigHash }),
     dimensions: vector.dimensions,
     vector: patchVector,
     embeddedAt: vector.embeddedAt,
@@ -322,6 +339,7 @@ async function evaluateHostedVisualPatch(input: {
 
   const metadataRejection = validateMatchAgainstChunk({
     match: input.match,
+    request: input.request,
     chunk,
     filter: input.request.filter,
     expectedDimensions: input.expectedDimensions
@@ -419,6 +437,7 @@ function validateHostedPatchMatch(
 
 function validateMatchAgainstChunk(input: {
   readonly match: HostedVectorSearchMatch;
+  readonly request: VisualVectorSearchRequest;
   readonly chunk: RagChunk;
   readonly filter: IndexFilter;
   readonly expectedDimensions: number | undefined;
@@ -455,6 +474,41 @@ function validateMatchAgainstChunk(input: {
       chunkId: input.match.chunkId,
       code: "vector_dimension_mismatch",
       reason: "Hosted visual vector match dimensions do not match the configured store dimensions."
+    };
+  }
+
+  if (
+    input.request.embeddingModel !== undefined &&
+    input.match.embeddingModel !== input.request.embeddingModel
+  ) {
+    return {
+      chunkId: input.match.chunkId,
+      code: "embedding_identity_mismatch",
+      reason: "Hosted visual vector match embedding model does not match the query embedding model."
+    };
+  }
+
+  if (
+    input.request.embeddingProvider !== undefined &&
+    input.match.embeddingProvider !== input.request.embeddingProvider
+  ) {
+    return {
+      chunkId: input.match.chunkId,
+      code: "embedding_identity_mismatch",
+      reason:
+        "Hosted visual vector match embedding provider does not match the query embedding provider."
+    };
+  }
+
+  if (
+    input.request.embeddingConfigHash !== undefined &&
+    input.match.embeddingConfigHash !== input.request.embeddingConfigHash
+  ) {
+    return {
+      chunkId: input.match.chunkId,
+      code: "embedding_identity_mismatch",
+      reason:
+        "Hosted visual vector match embedding config hash does not match the query embedding config hash."
     };
   }
 

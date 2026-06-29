@@ -10,6 +10,7 @@ export type SloAlertCategory =
   | "trace_replay"
   | "provider_health"
   | "http_edge"
+  | "rag_quality"
   | "readiness"
   | "custom";
 

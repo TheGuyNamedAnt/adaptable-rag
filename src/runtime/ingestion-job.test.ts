@@ -93,6 +93,17 @@ test("progress store records source and document status", async () => {
     finishedAt: NOW,
     updatedAt: NOW
   });
+  await store.updateDocument({
+    jobId: "job_1",
+    sourceId: "source_a",
+    documentId: "doc_failed",
+    status: "failed",
+    retryable: true,
+    failureStage: "chunking",
+    failurePhase: "chunking_rejected_record",
+    errorMessage: "Chunk limit exceeded.",
+    updatedAt: NOW
+  });
   await store.updateSource({
     jobId: "job_1",
     sourceId: "source_a",
@@ -106,4 +117,7 @@ test("progress store records source and document status", async () => {
   assert.equal((await store.listSources("job_1"))[0]?.acceptedDocumentCount, 1);
   assert.equal((await store.listDocuments("job_1"))[0]?.status, "accepted");
   assert.equal((await store.listDocuments("job_1"))[0]?.chunkCount, 2);
+  const failed = (await store.listDocuments("job_1", { statuses: ["failed"] }))[0];
+  assert.equal(failed?.failureStage, "chunking");
+  assert.equal(failed?.failurePhase, "chunking_rejected_record");
 });

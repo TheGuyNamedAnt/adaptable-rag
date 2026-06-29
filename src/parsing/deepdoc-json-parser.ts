@@ -22,6 +22,7 @@ import type {
   DocumentParserWarning,
   ParsedDocument
 } from "./parser.js";
+import { sanitizeParserWarning } from "./parser-diagnostics.js";
 
 export interface DeepDocJsonParserOptions {
   readonly config: ProviderBoundaryConfig;
@@ -179,7 +180,12 @@ function failedParseResult(
 ): DocumentParseResult {
   const document: ParsedDocument = {
     body: request.text ?? "",
-    ...(request.metadata === undefined ? {} : { metadata: request.metadata })
+    metadata: {
+      ...(request.metadata ?? {}),
+      parserFailed: true,
+      parserFailureCode: warning.code,
+      parserFailureMessage: warning.message
+    }
   };
 
   return {
@@ -247,11 +253,11 @@ function readWarnings(value: unknown): readonly DocumentParserWarning[] {
       return [];
     }
     return [
-      {
+      sanitizeParserWarning({
         code: item["code"],
         message: item["message"],
         ...(typeof item["path"] === "string" ? { path: item["path"] } : {})
-      }
+      })
     ];
   });
 }

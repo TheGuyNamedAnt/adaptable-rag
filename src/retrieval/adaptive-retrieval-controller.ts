@@ -40,7 +40,7 @@ export class AdaptiveRetrievalController implements Retriever {
     const initial = await this.retriever.retrieve(request);
     const initialDiagnosis = this.diagnose(initial, request);
 
-    if (!shouldRetry(initialDiagnosis, request)) {
+    if (!shouldRetry(initialDiagnosis, request, this.capabilities)) {
       return withStrategyTrace(initial, {
         initialStrategy,
         reason: reasonForInitialStrategy(request, this.capabilities),
@@ -50,8 +50,13 @@ export class AdaptiveRetrievalController implements Retriever {
       });
     }
 
-    const retryRequest = expandedCandidatePoolRequest(request, this.maxExpandedCandidatePoolLimit);
-    if (retryRequest === undefined) {
+    const retry = targetedRetryForDiagnosis(
+      initialDiagnosis,
+      request,
+      this.capabilities,
+      this.maxExpandedCandidatePoolLimit
+    );
+    if (retry === undefined) {
       return withStrategyTrace(initial, {
         initialStrategy,
         reason: reasonForInitialStrategy(request, this.capabilities),
@@ -61,22 +66,22 @@ export class AdaptiveRetrievalController implements Retriever {
       });
     }
 
-    const retry = await this.retriever.retrieve(retryRequest);
-    const retryDiagnosis = this.diagnose(retry, retryRequest);
-    const selected = betterResult(initial, initialDiagnosis, retry, retryDiagnosis);
-    const selectedDiagnosis = selected === retry ? retryDiagnosis : initialDiagnosis;
+    const retryResult = await this.retriever.retrieve(retry.request);
+    const retryDiagnosis = this.diagnose(retryResult, retry.request);
+    const selected = betterResult(initial, initialDiagnosis, retryResult, retryDiagnosis);
+    const selectedDiagnosis = selected === retryResult ? retryDiagnosis : initialDiagnosis;
 
     return withStrategyTrace(selected, {
       initialStrategy,
       reason: reasonForInitialStrategy(request, this.capabilities),
       diagnosis: selectedDiagnosis,
-      retryStrategy: "expanded_candidate_pool",
+      retryStrategy: retry.strategy,
       retryReason: initialDiagnosis.reason,
       finalDecision:
-        selected === retry && retryDiagnosis.code === "sufficient_candidates"
+        selected === retryResult && retryDiagnosis.code === "sufficient_candidates"
           ? "retried_answerable"
           : finalDecisionForDiagnosis(selectedDiagnosis),
-      attemptedStrategies: [initialStrategy, "expanded_candidate_pool"]
+      attemptedStrategies: [initialStrategy, retry.strategy]
     });
   }
 
@@ -157,6 +162,21 @@ function diagnosisCode(
   if (result.rejected.some((rejection) => rejection.code === "stale_vector")) {
     return "stale_or_missing_source";
   }
+  if (
+    freshnessEvidenceRequested(request) &&
+    result.candidates.length < Math.min(request.topK, minCandidates)
+  ) {
+    return "freshness_requested";
+  }
+  if (visualEvidenceRequested(request) && result.candidates.length === 0) {
+    return "visual_requested";
+  }
+  if (
+    graphEvidenceRequested(request) &&
+    !result.candidates.some((candidate) => candidate.graphEvidence)
+  ) {
+    return "graph_requested";
+  }
   if (result.candidates.length < Math.min(request.topK, minCandidates)) {
     return "insufficient_candidates";
   }
@@ -188,6 +208,8 @@ function diagnosisReason(
       return "graph_evidence_requested";
     case "visual_requested":
       return "visual_evidence_requested";
+    case "freshness_requested":
+      return "fresh_or_recent_evidence_requested";
     case "retriever_error":
       return "retriever_failed";
     case "sufficient_candidates":
@@ -195,11 +217,116 @@ function diagnosisReason(
   }
 }
 
-function shouldRetry(diagnosis: RetrievalDiagnosis, request: RetrievalRequest): boolean {
+function shouldRetry(
+  diagnosis: RetrievalDiagnosis,
+  request: RetrievalRequest,
+  capabilities: RetrieverCapabilities
+): boolean {
   if (request.mode === "visual") {
     return false;
   }
-  return diagnosis.code === "insufficient_candidates" || diagnosis.code === "trusted_citation_risk";
+  if (diagnosis.code === "visual_requested") {
+    return capabilities.supportsVisualSearch === true;
+  }
+  return (
+    diagnosis.code === "insufficient_candidates" ||
+    diagnosis.code === "trusted_citation_risk" ||
+    diagnosis.code === "graph_requested" ||
+    diagnosis.code === "freshness_requested"
+  );
+}
+
+function targetedRetryForDiagnosis(
+  diagnosis: RetrievalDiagnosis,
+  request: RetrievalRequest,
+  capabilities: RetrieverCapabilities,
+  maxExpandedCandidatePoolLimit: number
+):
+  | {
+      readonly strategy: AdaptiveRetrievalStrategy;
+      readonly request: RetrievalRequest;
+    }
+  | undefined {
+  if (
+    diagnosis.code === "visual_requested" &&
+    capabilities.supportsVisualSearch === true &&
+    request.mode !== "visual"
+  ) {
+    return {
+      strategy: "visual_retrieval",
+      request: {
+        ...request,
+        mode: "visual",
+        retrievalId: `${request.retrievalId ?? "retrieval"}_visual_retry`
+      }
+    };
+  }
+
+  if (
+    diagnosis.code === "graph_requested" &&
+    capabilities.supportsGraphSearch === true &&
+    request.graph?.enabled === true
+  ) {
+    const expanded = expandedCandidatePoolRequest(request, maxExpandedCandidatePoolLimit);
+    return {
+      strategy: "graph_deepening",
+      request: {
+        ...(expanded ?? request),
+        graph: {
+          ...request.graph,
+          enabled: true,
+          executionMode: "graph_first",
+          maxDepth: Math.max(request.graph.maxDepth ?? 1, 2),
+          neighborLimit: Math.max(request.graph.neighborLimit ?? 8, 24),
+          maxVisitedEntities: Math.max(request.graph.maxVisitedEntities ?? 64, 256)
+        },
+        retrievalId: `${request.retrievalId ?? "retrieval"}_graph_retry`
+      }
+    };
+  }
+
+  if (diagnosis.code === "freshness_requested") {
+    const expanded = expandedCandidatePoolRequest(request, maxExpandedCandidatePoolLimit);
+    return expanded === undefined
+      ? undefined
+      : {
+          strategy: "freshness_expansion",
+          request: {
+            ...expanded,
+            retrievalId: `${request.retrievalId ?? "retrieval"}_freshness_retry`
+          }
+        };
+  }
+
+  const expanded = expandedCandidatePoolRequest(request, maxExpandedCandidatePoolLimit);
+  return expanded === undefined
+    ? undefined
+    : {
+        strategy: "expanded_candidate_pool",
+        request: expanded
+      };
+}
+
+function visualEvidenceRequested(request: RetrievalRequest): boolean {
+  return (
+    request.mode === "visual" ||
+    request.intent?.primary === "visual" ||
+    request.intent?.secondary?.includes("visual") === true ||
+    request.intent?.sourceHints?.includes("visuals") === true
+  );
+}
+
+function graphEvidenceRequested(request: RetrievalRequest): boolean {
+  return request.graph?.enabled === true || request.intent?.sourceHints?.includes("graph") === true;
+}
+
+function freshnessEvidenceRequested(request: RetrievalRequest): boolean {
+  return (
+    request.intent?.primary === "freshness" ||
+    request.intent?.secondary?.includes("freshness") === true ||
+    request.intent?.sourceHints?.includes("recent") === true ||
+    request.intent?.sourceHints?.includes("incidents") === true
+  );
 }
 
 function expandedCandidatePoolRequest(

@@ -516,9 +516,18 @@ function decodeHtmlEntities(text: string): string {
       case "ldquo":
         return '"';
       default:
-        return " ";
+        return namedLatinEntity(entity) ?? " ";
     }
   });
+}
+
+function namedLatinEntity(entity: string): string | undefined {
+  const lower = entity.toLowerCase();
+  const decoded = NAMED_LATIN_HTML_ENTITIES[lower];
+  if (decoded === undefined) {
+    return undefined;
+  }
+  return entity[0] === entity[0]?.toUpperCase() ? decoded.toUpperCase() : decoded;
 }
 
 function safeCodePoint(value: number): string {
@@ -531,6 +540,40 @@ function safeCodePoint(value: number): string {
 function decodeBytes(bytes: Uint8Array | undefined): string {
   return bytes === undefined ? "" : new TextDecoder("utf-8", { fatal: false }).decode(bytes);
 }
+
+const NAMED_LATIN_HTML_ENTITIES: Readonly<Record<string, string>> = {
+  agrave: "à",
+  aacute: "á",
+  acirc: "â",
+  atilde: "ã",
+  auml: "ä",
+  aring: "å",
+  aelig: "æ",
+  ccedil: "ç",
+  egrave: "è",
+  eacute: "é",
+  ecirc: "ê",
+  euml: "ë",
+  igrave: "ì",
+  iacute: "í",
+  icirc: "î",
+  iuml: "ï",
+  eth: "ð",
+  ntilde: "ñ",
+  ograve: "ò",
+  oacute: "ó",
+  ocirc: "ô",
+  otilde: "õ",
+  ouml: "ö",
+  oslash: "ø",
+  ugrave: "ù",
+  uacute: "ú",
+  ucirc: "û",
+  uuml: "ü",
+  yacute: "ý",
+  thorn: "þ",
+  yuml: "ÿ"
+};
 
 function matches(
   input: string,

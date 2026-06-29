@@ -1,5 +1,9 @@
 import { hashText } from "../shared/hash.js";
-import { DefaultQueryPlanner, detectGraphQueryIntent } from "./default-query-planner.js";
+import {
+  classifyQueryIntent,
+  DefaultQueryPlanner,
+  detectGraphQueryIntent
+} from "./default-query-planner.js";
 import type {
   PlannedQuery,
   QueryPlan,
@@ -48,6 +52,7 @@ export class ModelAssistedQueryPlanner implements QueryPlanner {
       const lowLevelKeywords = sanitizeKeywords(model.lowLevelKeywords ?? []);
       const highLevelKeywords = sanitizeKeywords(model.highLevelKeywords ?? []);
       const graphIntent = detectGraphQueryIntent(question, lowLevelKeywords);
+      const intent = classifyQueryIntent(question, graphIntent);
       const queries = sanitizePlannedQueries({
         plannedQueries: model.plannedQueries ?? [],
         question,
@@ -60,6 +65,7 @@ export class ModelAssistedQueryPlanner implements QueryPlanner {
 
       return {
         originalQuestion: question,
+        intent,
         lowLevelKeywords,
         highLevelKeywords,
         graphIntent,
@@ -73,6 +79,10 @@ export class ModelAssistedQueryPlanner implements QueryPlanner {
           plannedQueryHashes: queries.map((query) => hashText(query.query)),
           lowLevelKeywordHashes: lowLevelKeywords.map(hashText),
           highLevelKeywordHashes: highLevelKeywords.map(hashText),
+          primaryIntent: intent.primary,
+          secondaryIntentHashes: intent.secondary.map(hashText),
+          sourceHintHashes: intent.sourceHints.map(hashText),
+          intentConfidence: intent.confidence,
           graphRoute: graphIntent.route,
           ...(graphIntent.direction === undefined ? {} : { graphDirection: graphIntent.direction }),
           ...(graphIntent.executionMode === undefined

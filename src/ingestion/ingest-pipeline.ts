@@ -13,11 +13,16 @@ import type { IndexOperationResult, IndexOverwriteMode } from "../indexing/index
 import type { ValidatedRagProfile } from "../profiles/profile-validation.js";
 import type { RequestPrincipal } from "../security/access-scope.js";
 import { BatchIndexWriter } from "./batch-index-writer.js";
+import { buildChunkRelationships, type ChunkRelationship } from "./chunk-relationships.js";
 import {
   analyzeParserQualityForDocuments,
   type ParserQualitySummary,
   type ParserQualityWarning
 } from "./parser-quality.js";
+import {
+  buildSearchableArtifacts,
+  type SearchableArtifactWarning
+} from "./searchable-artifacts.js";
 
 export interface IngestPipelineRequest {
   readonly profile: ValidatedRagProfile;
@@ -57,11 +62,13 @@ export interface IngestPipelineResult {
   readonly loadedSourceIds: readonly string[];
   readonly documents: readonly RagDocument[];
   readonly chunks: readonly RagChunk[];
+  readonly chunkRelationships: readonly ChunkRelationship[];
   readonly rejectedRecords: readonly RejectedCorpusRecord[];
   readonly normalizationIssues: readonly CorpusNormalizationIssue[];
   readonly adapterWarnings: readonly CorpusAdapterWarning[];
   readonly parserQuality: ParserQualitySummary;
   readonly parserQualityWarnings: readonly ParserQualityWarning[];
+  readonly searchableArtifactWarnings?: readonly SearchableArtifactWarning[];
   readonly chunkingWarnings: readonly ChunkingWarning[];
   readonly indexResults: readonly IndexOperationResult[];
 }
@@ -102,6 +109,7 @@ export class IngestPipeline {
     const rejectedRecords: RejectedCorpusRecord[] = [];
     const normalizationIssues: CorpusNormalizationIssue[] = [];
     const adapterWarnings: CorpusAdapterWarning[] = [];
+    const searchableArtifactWarnings: SearchableArtifactWarning[] = [];
     const chunkingWarnings: ChunkingWarning[] = [];
     const indexResults: IndexOperationResult[] = [];
     const completedSourceIds = new Set(request.resumeState?.completedSourceIds ?? []);
@@ -162,6 +170,7 @@ export class IngestPipeline {
           rejectedRecords.push({
             recordId: document.id,
             sourceId: document.provenance.sourceId,
+            rejectedStage: "chunking",
             reason: message
           });
           chunkingWarnings.push({
@@ -172,11 +181,18 @@ export class IngestPipeline {
           continue;
         }
 
+        const searchableArtifacts = buildSearchableArtifacts({
+          document,
+          bodyChunks: chunked.chunks
+        });
+        searchableArtifactWarnings.push(...searchableArtifacts.warnings);
+        const chunksForIndex = [...chunked.chunks, ...searchableArtifacts.chunks];
+
         const writeResult = await this.indexWriter.write({
           documents: [
             {
               document,
-              chunks: chunked.chunks
+              chunks: chunksForIndex
             }
           ],
           overwriteMode: request.overwriteMode ?? "reject",
@@ -190,6 +206,7 @@ export class IngestPipeline {
           rejectedRecords.push({
             recordId: document.id,
             sourceId: document.provenance.sourceId,
+            rejectedStage: "indexing",
             reason: message
           });
           chunkingWarnings.push({
@@ -227,6 +244,7 @@ export class IngestPipeline {
     }
 
     const parserQuality = analyzeParserQualityForDocuments(documents);
+    const chunkRelationships = buildChunkRelationships({ documents, chunks });
 
     return {
       runId,
@@ -235,11 +253,13 @@ export class IngestPipeline {
       loadedSourceIds,
       documents,
       chunks,
+      chunkRelationships,
       rejectedRecords,
       normalizationIssues,
       adapterWarnings,
       parserQuality: parserQuality.summary,
       parserQualityWarnings: parserQuality.warnings,
+      searchableArtifactWarnings,
       chunkingWarnings,
       indexResults
     };

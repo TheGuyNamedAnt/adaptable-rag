@@ -2,6 +2,7 @@ import type { RagChunk } from "../documents/chunk.js";
 import type { RagDocument } from "../documents/document.js";
 import type { DocumentLayoutRelation, DocumentLayoutRegion } from "../documents/layout.js";
 import type { ChunkVector, VectorStore } from "../indexing/vector-store.js";
+import { embeddingIdentityFor, embeddingIndexConfigHashFor } from "./embedding-identity.js";
 import type { EmbeddingAdapter } from "./embedding-types.js";
 
 export interface LayoutRelationIndexerOptions {
@@ -115,6 +116,12 @@ export class LayoutRelationIndexer {
     }
 
     const embeddingsById = new Map(result.embeddings.map((embedding) => [embedding.id, embedding]));
+    const identity = embeddingIdentityFor({
+      provider: result.provider,
+      modelName: result.modelName,
+      dimensions: result.dimensions,
+      adapterId: this.adapter.id
+    });
     const vectors: ChunkVector[] = [];
 
     for (const input of inputs) {
@@ -140,14 +147,28 @@ export class LayoutRelationIndexer {
         continue;
       }
 
+      const indexConfigHash = embeddingIndexConfigHashFor({
+        provider: result.provider,
+        modelName: result.modelName,
+        dimensions: result.dimensions,
+        adapterId: this.adapter.id,
+        ...optionalIdentityMetadata(input.chunk.metadata)
+      });
+
       vectors.push({
-        id: layoutRelationVectorId(result.modelName, input.document.id, input.relation.id),
+        id: layoutRelationVectorId(
+          identity.embeddingConfigHash,
+          input.document.id,
+          input.relation.id
+        ),
         chunkId: input.chunk.id,
         documentId: input.chunk.documentId,
         tenantId: input.chunk.accessScope.tenantId,
         namespaceId: input.chunk.namespaceId,
         textHash: input.chunk.textHash,
         embeddingModel: result.modelName,
+        embeddingProvider: result.provider,
+        embeddingConfigHash: identity.embeddingConfigHash,
         dimensions: result.dimensions,
         vector: embedding.vector,
         embeddedAt,
@@ -156,7 +177,11 @@ export class LayoutRelationIndexer {
           relationId: input.relation.id,
           relationKind: input.relation.kind,
           fromRegionId: input.relation.fromRegionId,
-          toRegionId: input.relation.toRegionId
+          toRegionId: input.relation.toRegionId,
+          embeddingProvider: result.provider,
+          embeddingAdapterId: this.adapter.id,
+          embeddingConfigHash: identity.embeddingConfigHash,
+          embeddingIndexConfigHash: indexConfigHash
         }
       });
     }
@@ -287,10 +312,43 @@ function layoutRelationInputId(documentId: string, relationId: string): string {
   return `layout_relation_${sanitizeId(documentId)}_${sanitizeId(relationId)}`;
 }
 
-function layoutRelationVectorId(modelName: string, documentId: string, relationId: string): string {
-  return `${sanitizeId(modelName)}_${layoutRelationInputId(documentId, relationId)}`;
+function layoutRelationVectorId(
+  embeddingConfigHash: string,
+  documentId: string,
+  relationId: string
+): string {
+  return `${sanitizeId(embeddingConfigHash)}_${layoutRelationInputId(documentId, relationId)}`;
 }
 
 function sanitizeId(value: string): string {
   return value.replace(/[^a-z0-9_-]/gi, "_");
+}
+
+function stringMetadata(
+  metadata: Readonly<Record<string, string | number | boolean>> | undefined,
+  key: string
+): string | undefined {
+  const value = metadata?.[key];
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function optionalIdentityMetadata(
+  metadata: Readonly<Record<string, string | number | boolean>> | undefined
+): {
+  readonly chunkingPolicyId?: string;
+  readonly chunkingPolicyVersion?: string;
+  readonly chunkerVersion?: string;
+  readonly preprocessingVersion?: string;
+} {
+  const chunkingPolicyId = stringMetadata(metadata, "chunkingPolicyId");
+  const chunkingPolicyVersion = stringMetadata(metadata, "chunkingPolicyVersion");
+  const chunkerVersion = stringMetadata(metadata, "chunkerVersion");
+  const preprocessingVersion = stringMetadata(metadata, "preprocessingVersion");
+
+  return {
+    ...(chunkingPolicyId === undefined ? {} : { chunkingPolicyId }),
+    ...(chunkingPolicyVersion === undefined ? {} : { chunkingPolicyVersion }),
+    ...(chunkerVersion === undefined ? {} : { chunkerVersion }),
+    ...(preprocessingVersion === undefined ? {} : { preprocessingVersion })
+  };
 }

@@ -1,0 +1,115 @@
+{
+  "id": "adversarial-ownership-recall",
+  "description": "Expected ownership and registration graph for adversarial document shapes: nested ownership, same-name legal variants, similar company names, and table header context.",
+  "documents": [
+    {
+      "id": "doc_nested_ownership_table",
+      "title": "Nested Ownership Table",
+      "body": "Parent | Child | Jurisdiction\nGlobal Parent Inc. | Northwind Holdings LLC | Delaware\nNorthwind Holdings LLC | Northwind Operating LLC | New York"
+    },
+    {
+      "id": "doc_same_name_variants",
+      "title": "Same Name Legal Variants",
+      "body": "Company Name | Domicile or State of Incorporation\nBenjamin Moore & Co. | New Jersey\nBenjamin Moore & Co., Limited | Canada"
+    },
+    {
+      "id": "doc_similar_names",
+      "title": "Similar Names Are Separate",
+      "body": "Company Name | Domicile or State of Incorporation\nApple Inc. | California\nApple Hospitality REIT, Inc. | Maryland"
+    }
+  ],
+  "expectedEntities": [
+    { "id": "entity_global_parent", "kind": "legal_entity", "name": "Global Parent Inc." },
+    { "id": "entity_northwind_holdings", "kind": "legal_entity", "name": "Northwind Holdings LLC" },
+    {
+      "id": "entity_northwind_operating",
+      "kind": "legal_entity",
+      "name": "Northwind Operating LLC"
+    },
+    { "id": "entity_benjamin_moore_us", "kind": "legal_entity", "name": "Benjamin Moore & Co." },
+    {
+      "id": "entity_benjamin_moore_canada",
+      "kind": "legal_entity",
+      "name": "Benjamin Moore & Co., Limited"
+    },
+    { "id": "entity_apple_inc", "kind": "legal_entity", "name": "Apple Inc." },
+    {
+      "id": "entity_apple_hospitality",
+      "kind": "legal_entity",
+      "name": "Apple Hospitality REIT, Inc."
+    },
+    { "id": "location_delaware", "kind": "location", "name": "Delaware" },
+    { "id": "location_new_york", "kind": "location", "name": "New York" },
+    { "id": "location_new_jersey", "kind": "location", "name": "New Jersey" },
+    { "id": "location_canada", "kind": "location", "name": "Canada" },
+    { "id": "location_california", "kind": "location", "name": "California" },
+    { "id": "location_maryland", "kind": "location", "name": "Maryland" }
+  ],
+  "expectedRelations": [
+    {
+      "id": "relation_global_parent_owns_northwind_holdings",
+      "relationKind": "owns",
+      "sourceEntityId": "entity_global_parent",
+      "targetEntityId": "entity_northwind_holdings"
+    },
+    {
+      "id": "relation_northwind_holdings_owns_northwind_operating",
+      "relationKind": "owns",
+      "sourceEntityId": "entity_northwind_holdings",
+      "targetEntityId": "entity_northwind_operating"
+    },
+    {
+      "id": "relation_benjamin_moore_us_registered_new_jersey",
+      "relationKind": "registered_in",
+      "sourceEntityId": "entity_benjamin_moore_us",
+      "targetEntityId": "location_new_jersey"
+    },
+    {
+      "id": "relation_benjamin_moore_canada_registered_canada",
+      "relationKind": "registered_in",
+      "sourceEntityId": "entity_benjamin_moore_canada",
+      "targetEntityId": "location_canada"
+    },
+    {
+      "id": "relation_apple_inc_registered_california",
+      "relationKind": "registered_in",
+      "sourceEntityId": "entity_apple_inc",
+      "targetEntityId": "location_california"
+    },
+    {
+      "id": "relation_apple_hospitality_registered_maryland",
+      "relationKind": "registered_in",
+      "sourceEntityId": "entity_apple_hospitality",
+      "targetEntityId": "location_maryland"
+    }
+  ],
+  "forbiddenRelations": [
+    {
+      "relationKind": "owns",
+      "sourceName": "Global Parent Inc.",
+      "targetName": "Northwind Operating LLC"
+    },
+    {
+      "relationKind": "registered_in",
+      "sourceName": "Apple Inc.",
+      "targetName": "Maryland"
+    },
+    {
+      "relationKind": "registered_in",
+      "sourceName": "Apple Hospitality REIT, Inc.",
+      "targetName": "California"
+    },
+    {
+      "relationKind": "registered_in",
+      "sourceName": "Benjamin Moore & Co.",
+      "targetName": "Canada"
+    }
+  ],
+  "thresholds": {
+    "minimumEntityRecall": 1,
+    "minimumRelationRecall": 1,
+    "maximumExtraEntities": 0,
+    "maximumExtraRelations": 0,
+    "maximumForbiddenRelations": 0
+  }
+}

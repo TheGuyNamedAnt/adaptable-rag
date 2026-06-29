@@ -145,7 +145,7 @@ export function createCompanyConnectorAdapterPack(
       {
         connectorId: COMPANY_DOCS_CONNECTOR_ID,
         command:
-          "npm run company:validate -- --module dist/company/company-profile.js --export companyProfile --adapter-pack-export companyAdapterPack --run-pack-contracts --use-case docs --contract-mode delta --contract-mode full --min-delta-returned-records 1 --disallow-connector-warnings"
+          "npm run company:validate -- --module dist/company/company-profile.js --export companyDeployment --run-pack-contracts --use-case docs --contract-mode delta --contract-mode full --min-delta-returned-records 1 --disallow-connector-warnings"
       }
     ],
     corpusAdapterTests: [

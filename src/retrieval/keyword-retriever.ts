@@ -2,6 +2,12 @@ import type { ChunkStore } from "../indexing/chunk-store.js";
 import { redactIndexFilterForTrace } from "../indexing/index-filter.js";
 import type { IndexedChunk, IndexFilter } from "../indexing/index-types.js";
 import { hashText } from "../shared/hash.js";
+import {
+  applyFreshnessRecencyBoostToScore,
+  freshnessTraceForCandidates,
+  freshnessTimestampRange,
+  isFreshnessRetrievalIntent
+} from "./freshness-ranking.js";
 import type { Retriever, RetrieverCapabilities } from "./retriever.js";
 import type {
   RetrievalCandidate,
@@ -128,7 +134,7 @@ export class KeywordRetriever implements Retriever {
       }
     }
 
-    const ranked = [...applyStructuredNeighborBoosts(scored)]
+    const ranked = [...applyFreshnessRecencyBoosts(applyStructuredNeighborBoosts(scored), request)]
       .sort(compareScoredChunks)
       .slice(0, request.topK)
       .map<RetrievalCandidate>((entry, index) => ({
@@ -227,8 +233,7 @@ function scoreChunk(
   readonly reasons: readonly string[];
 } {
   const chunk = indexed.chunk;
-  const haystack =
-    `${chunk.text}\n${chunk.provenance.title}\n${chunk.citation.title}`.toLowerCase();
+  const haystack = keywordHaystackForChunk(chunk);
   const matchedTerms = searchTerms.filter((term) => haystack.includes(term));
 
   if (matchedTerms.length === 0) {
@@ -271,9 +276,7 @@ function buildTermWeights(
   searchTerms: readonly string[]
 ): ReadonlyMap<string, number> {
   const weights = new Map<string, number>();
-  const haystacks = candidatePool.map((indexed) =>
-    `${indexed.chunk.text}\n${indexed.chunk.provenance.title}\n${indexed.chunk.citation.title}`.toLowerCase()
-  );
+  const haystacks = candidatePool.map((indexed) => keywordHaystackForChunk(indexed.chunk));
   const candidateCount = Math.max(haystacks.length, 1);
 
   for (const term of searchTerms) {
@@ -282,6 +285,26 @@ function buildTermWeights(
   }
 
   return weights;
+}
+
+function keywordHaystackForChunk(chunk: IndexedChunk["chunk"]): string {
+  return [
+    chunk.text,
+    stringMetadata(chunk.metadata, "searchableEmbeddingText"),
+    chunk.provenance.title,
+    chunk.citation.title
+  ]
+    .filter((value): value is string => value !== undefined && value.trim().length > 0)
+    .join("\n")
+    .toLowerCase();
+}
+
+function stringMetadata(
+  metadata: Readonly<Record<string, string | number | boolean>> | undefined,
+  key: string
+): string | undefined {
+  const value = metadata?.[key];
+  return typeof value === "string" && value.trim() ? value : undefined;
 }
 
 function applyStructuredNeighborBoosts(
@@ -315,6 +338,36 @@ function applyStructuredNeighborBoosts(
       ...entry,
       score: roundScore(entry.score + boost),
       reasons: [...new Set([...entry.reasons, "structured_neighbor_match"])]
+    };
+  });
+}
+
+function applyFreshnessRecencyBoosts(
+  scored: readonly ScoredIndexedChunk[],
+  request: RetrievalRequest
+): readonly ScoredIndexedChunk[] {
+  if (!isFreshnessRetrievalIntent(request) || scored.length < 2) {
+    return scored;
+  }
+
+  const timestamps = freshnessTimestampRange(scored.map((entry) => entry.indexed.chunk));
+  if (!timestamps) {
+    return scored;
+  }
+
+  return scored.map((entry) => {
+    const boosted = applyFreshnessRecencyBoostToScore(
+      {
+        chunk: entry.indexed.chunk,
+        score: entry.score,
+        reasons: entry.reasons
+      },
+      timestamps
+    );
+    return {
+      ...entry,
+      score: boosted.score,
+      reasons: boosted.reasons
     };
   });
 }
@@ -378,6 +431,7 @@ export function buildKeywordRetrievalResult(input: {
   readonly candidates: readonly RetrievalCandidate[];
   readonly rejected: readonly RetrievalRejection[];
 }): RetrievalResult {
+  const freshnessTrace = freshnessTraceForCandidates(input.candidates, input.request);
   const trace: RetrievalTrace = {
     retrievalId: input.retrievalId,
     startedAt: input.startedAt,
@@ -389,7 +443,8 @@ export function buildKeywordRetrievalResult(input: {
     access: redactIndexFilterForTrace(input.request.filter),
     candidatePoolSize: input.candidatePool.length,
     returnedCount: input.candidates.length,
-    rejectedCount: input.rejected.length
+    rejectedCount: input.rejected.length,
+    ...(freshnessTrace === undefined ? {} : { freshness: freshnessTrace })
   };
 
   return {

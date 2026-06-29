@@ -9,6 +9,7 @@ import type { RagRunTrace, TraceEvent } from "../observability/trace.js";
 import type {
   IngestionCheckpointRecord,
   IngestionCheckpointStore,
+  IngestionDocumentStatus,
   IngestionDocumentProgressRecord,
   IngestionJobRecord,
   IngestionJobStore,
@@ -28,10 +29,17 @@ export interface InspectIngestionRunRequest {
   readonly jobStore: IngestionJobStore;
   readonly checkpointStore?: IngestionCheckpointStore;
   readonly progressStore?: IngestionProgressStore;
+  readonly sourceId?: string;
+  readonly documentStatuses?: readonly IngestionDocumentStatus[];
+  readonly checkpointLimit?: number;
+  readonly checkpointOffset?: number;
+  readonly documentLimit?: number;
+  readonly documentOffset?: number;
 }
 
 export interface InspectIngestionRunResult {
-  readonly job?: IngestionJobRecord;
+  readonly job: IngestionJobRecord;
+  readonly summary: InspectIngestionRunSummary;
   readonly checkpoints: readonly IngestionCheckpointRecord[];
   readonly latestCheckpoint?: IngestionCheckpointRecord;
   readonly sources: readonly IngestionSourceProgressRecord[];
@@ -40,6 +48,28 @@ export interface InspectIngestionRunResult {
   readonly skippedDocuments: readonly IngestionDocumentProgressRecord[];
   readonly acceptedDocuments: readonly IngestionDocumentProgressRecord[];
   readonly counts: InspectIngestionCounts;
+  readonly page: InspectIngestionPage;
+}
+
+export interface InspectIngestionRunSummary {
+  readonly jobId: string;
+  readonly runId: string;
+  readonly tenantId: string;
+  readonly namespaceId: string;
+  readonly sourceIds: readonly string[];
+  readonly status: IngestionJobRecord["status"];
+  readonly stage: IngestionJobRecord["stage"];
+  readonly attempt: number;
+  readonly requestedAt: string;
+  readonly startedAt?: string;
+  readonly finishedAt?: string;
+  readonly durationMs?: number;
+  readonly updatedAt: string;
+  readonly currentCheckpointPhase?: string;
+  readonly failed: boolean;
+  readonly counts?: IngestionJobRecord["counts"];
+  readonly errorName?: string;
+  readonly errorMessage?: string;
 }
 
 export interface InspectIngestionCounts {
@@ -50,6 +80,17 @@ export interface InspectIngestionCounts {
   readonly skippedDocumentCount: number;
   readonly acceptedDocumentCount: number;
   readonly retryableFailureCount: number;
+}
+
+export interface InspectIngestionPage {
+  readonly checkpointLimit: number;
+  readonly checkpointOffset: number;
+  readonly checkpointHasMore: boolean;
+  readonly documentLimit: number;
+  readonly documentOffset: number;
+  readonly documentHasMore: boolean;
+  readonly sourceId?: string;
+  readonly documentStatuses?: readonly IngestionDocumentStatus[];
 }
 
 export interface InspectSourceHealthRequest {
@@ -218,24 +259,45 @@ export async function inspectIngestionRun(
   request: InspectIngestionRunRequest
 ): Promise<InspectIngestionRunResult> {
   const job = await request.jobStore.get(request.jobId);
-  const checkpoints = request.checkpointStore
-    ? await request.checkpointStore.list(request.jobId)
+  if (!job) {
+    throw new Error(`Ingestion job "${request.jobId}" was not found.`);
+  }
+
+  const checkpointLimit = inspectLimit(request.checkpointLimit);
+  const checkpointOffset = inspectOffset(request.checkpointOffset);
+  const documentLimit = inspectLimit(request.documentLimit);
+  const documentOffset = inspectOffset(request.documentOffset);
+  const checkpointsPage = request.checkpointStore
+    ? await request.checkpointStore.list(request.jobId, {
+        limit: checkpointLimit + 1,
+        offset: checkpointOffset
+      })
     : [];
+  const checkpoints = checkpointsPage.slice(0, checkpointLimit);
   const latestCheckpoint = request.checkpointStore
     ? await request.checkpointStore.latest(request.jobId)
     : undefined;
   const sources = request.progressStore
-    ? await request.progressStore.listSources(request.jobId)
+    ? await request.progressStore.listSources(request.jobId, {
+        ...(request.sourceId === undefined ? {} : { sourceId: request.sourceId })
+      })
     : [];
-  const documents = request.progressStore
-    ? await request.progressStore.listDocuments(request.jobId)
+  const documentsPage = request.progressStore
+    ? await request.progressStore.listDocuments(request.jobId, {
+        ...(request.sourceId === undefined ? {} : { sourceId: request.sourceId }),
+        ...(request.documentStatuses === undefined ? {} : { statuses: request.documentStatuses }),
+        limit: documentLimit + 1,
+        offset: documentOffset
+      })
     : [];
+  const documents = documentsPage.slice(0, documentLimit);
   const failedDocuments = documents.filter((document) => document.status === "failed");
   const skippedDocuments = documents.filter((document) => document.status === "skipped");
   const acceptedDocuments = documents.filter((document) => document.status === "accepted");
 
   return {
-    ...(job === undefined ? {} : { job }),
+    job,
+    summary: inspectIngestionSummary(job, latestCheckpoint),
     checkpoints,
     ...(latestCheckpoint === undefined ? {} : { latestCheckpoint }),
     sources,
@@ -251,6 +313,18 @@ export async function inspectIngestionRun(
       skippedDocumentCount: skippedDocuments.length,
       acceptedDocumentCount: acceptedDocuments.length,
       retryableFailureCount: failedDocuments.filter((document) => document.retryable).length
+    },
+    page: {
+      checkpointLimit,
+      checkpointOffset,
+      checkpointHasMore: checkpointsPage.length > checkpointLimit,
+      documentLimit,
+      documentOffset,
+      documentHasMore: documentsPage.length > documentLimit,
+      ...(request.sourceId === undefined ? {} : { sourceId: request.sourceId }),
+      ...(request.documentStatuses === undefined
+        ? {}
+        : { documentStatuses: request.documentStatuses })
     }
   };
 }
@@ -487,4 +561,70 @@ function sourceHealth(source: IngestionSourceProgressRecord): InspectSourceHealt
     return "unknown";
   }
   return "warning";
+}
+
+const DEFAULT_INSPECT_PAGE_SIZE = 100;
+const MAX_INSPECT_PAGE_SIZE = 500;
+
+function inspectIngestionSummary(
+  job: IngestionJobRecord,
+  latestCheckpoint: IngestionCheckpointRecord | undefined
+): InspectIngestionRunSummary {
+  const durationMs = inspectDurationMs(job.startedAt, job.finishedAt);
+  const currentCheckpointPhase =
+    checkpointPhase(job.checkpoint) ?? checkpointPhase(latestCheckpoint?.checkpoint);
+  return {
+    jobId: job.jobId,
+    runId: job.runId,
+    tenantId: job.tenantId,
+    namespaceId: job.namespaceId,
+    sourceIds: job.sourceIds,
+    status: job.status,
+    stage: job.stage,
+    attempt: job.attempt,
+    requestedAt: job.requestedAt,
+    ...(job.startedAt === undefined ? {} : { startedAt: job.startedAt }),
+    ...(job.finishedAt === undefined ? {} : { finishedAt: job.finishedAt }),
+    ...(durationMs === undefined ? {} : { durationMs }),
+    updatedAt: job.updatedAt,
+    ...(currentCheckpointPhase === undefined ? {} : { currentCheckpointPhase }),
+    failed: job.status === "failed" || job.errorMessage !== undefined,
+    ...(job.counts === undefined ? {} : { counts: job.counts }),
+    ...(job.errorName === undefined ? {} : { errorName: job.errorName }),
+    ...(job.errorMessage === undefined ? {} : { errorMessage: job.errorMessage })
+  };
+}
+
+function inspectLimit(value: number | undefined): number {
+  if (value === undefined) {
+    return DEFAULT_INSPECT_PAGE_SIZE;
+  }
+  return Math.min(MAX_INSPECT_PAGE_SIZE, Math.max(1, Math.trunc(value)));
+}
+
+function inspectOffset(value: number | undefined): number {
+  return value === undefined ? 0 : Math.max(0, Math.trunc(value));
+}
+
+function inspectDurationMs(
+  startedAt: string | undefined,
+  finishedAt: string | undefined
+): number | undefined {
+  if (startedAt === undefined || finishedAt === undefined) {
+    return undefined;
+  }
+
+  const started = Date.parse(startedAt);
+  const finished = Date.parse(finishedAt);
+  if (!Number.isFinite(started) || !Number.isFinite(finished)) {
+    return undefined;
+  }
+
+  return Math.max(0, finished - started);
+}
+
+function checkpointPhase(
+  checkpoint: Readonly<Record<string, unknown>> | undefined
+): string | undefined {
+  return typeof checkpoint?.["phase"] === "string" ? checkpoint["phase"] : undefined;
 }

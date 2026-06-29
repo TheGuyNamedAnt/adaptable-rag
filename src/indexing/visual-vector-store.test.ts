@@ -12,6 +12,7 @@ import {
   makeIndexFilter,
   makePrincipal
 } from "../test-support/fixtures.js";
+import { runVisualVectorStoreContract } from "../test-support/visual-vector-store-contract.js";
 import { InMemoryRagIndex } from "./in-memory-index.js";
 import { InMemoryVisualVectorStore, type VisualChunkVector } from "./visual-vector-store.js";
 
@@ -23,6 +24,17 @@ const BOX: LayoutBox = {
   height: 60,
   unit: "pixel"
 };
+
+runVisualVectorStoreContract({
+  name: "InMemoryVisualVectorStore",
+  dimensions: 8,
+  createStore: ({ chunkStore, dimensions }) =>
+    new InMemoryVisualVectorStore({
+      chunkStore,
+      dimensions,
+      now: () => FIXED_NOW
+    })
+});
 
 test("indexes visual chunk vectors and finds late-interaction matches", () => {
   const { chunkIndex, chunks } = makeChunkIndex([
@@ -120,6 +132,70 @@ test("visual vector store rejects stale vectors whose chunk hash changed", () =>
 
   assert.equal(result.candidates.length, 0);
   assert.equal(result.rejected[0]?.code, "stale_vector");
+});
+
+test("visual vector store rejects candidates from a different embedding model", () => {
+  const { chunkIndex, chunks } = makeChunkIndex([makeDocument()]);
+  const [chunk] = chunks;
+  assert.ok(chunk);
+  const store = new InMemoryVisualVectorStore({
+    chunkStore: chunkIndex,
+    dimensions: 3,
+    now: () => FIXED_NOW
+  });
+
+  store.addVisualChunkVectors([
+    {
+      ...vectorForChunk(chunk, 3),
+      embeddingModel: "old-visual-model",
+      embeddingProvider: "fake-visual",
+      embeddingConfigHash: "old-visual-hash"
+    }
+  ]);
+
+  const result = store.findNearestVisualVectors({
+    vectors: visualVectorsForText(chunk.text, 3),
+    filter: makeIndexFilter(),
+    topK: 1,
+    embeddingModel: "new-visual-model",
+    embeddingProvider: "fake-visual",
+    embeddingConfigHash: "new-visual-hash",
+    includeRejected: true
+  });
+
+  assert.equal(result.candidates.length, 0);
+  assert.equal(result.rejected[0]?.code, "embedding_identity_mismatch");
+});
+
+test("visual vector store rejects legacy vectors missing required embedding config hash", () => {
+  const { chunkIndex, chunks } = makeChunkIndex([makeDocument()]);
+  const [chunk] = chunks;
+  assert.ok(chunk);
+  const store = new InMemoryVisualVectorStore({
+    chunkStore: chunkIndex,
+    dimensions: 3,
+    now: () => FIXED_NOW
+  });
+
+  store.addVisualChunkVectors([
+    {
+      ...vectorForChunk(chunk, 3),
+      embeddingModel: "same-visual-model"
+    }
+  ]);
+
+  const result = store.findNearestVisualVectors({
+    vectors: visualVectorsForText(chunk.text, 3),
+    filter: makeIndexFilter(),
+    topK: 1,
+    embeddingModel: "same-visual-model",
+    embeddingProvider: "provider",
+    embeddingConfigHash: "required-visual-hash",
+    includeRejected: true
+  });
+
+  assert.equal(result.candidates.length, 0);
+  assert.equal(result.rejected[0]?.code, "embedding_identity_mismatch");
 });
 
 test("visual vector store rejects dimension mismatches and invalid layout evidence", () => {

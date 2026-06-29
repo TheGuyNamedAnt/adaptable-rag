@@ -92,18 +92,165 @@ test("adaptive controller refuses access-denied retrieval without retry", async 
   assert.equal(retrieved.trace.adaptiveStrategy?.finalDecision, "refused");
 });
 
+test("adaptive controller diagnoses missing visual evidence without retry", async () => {
+  const request = baseRequest({
+    mode: "visual",
+    intent: {
+      primary: "visual",
+      sourceHints: ["visuals"]
+    }
+  });
+  const retriever = new SequenceRetriever([result({ request, candidates: [] })]);
+  const controller = new AdaptiveRetrievalController({ retriever });
+
+  const retrieved = await controller.retrieve(request);
+
+  assert.equal(retriever.calls.length, 1);
+  assert.equal(retrieved.trace.adaptiveStrategy?.diagnosis.code, "visual_requested");
+  assert.equal(retrieved.trace.adaptiveStrategy?.finalDecision, "insufficient_evidence");
+});
+
+test("adaptive controller retries missing visual evidence with visual mode when supported", async () => {
+  const request = baseRequest({
+    mode: "hybrid",
+    intent: {
+      primary: "visual",
+      sourceHints: ["visuals"]
+    }
+  });
+  const retriever = new SequenceRetriever(
+    [
+      result({ request, candidates: [] }),
+      result({
+        request: { ...request, mode: "visual" },
+        candidates: [{ chunk, indexedAt: FIXED_NOW }]
+      })
+    ],
+    {
+      modes: ["keyword", "hybrid", "visual"],
+      supportsVectorSearch: true,
+      supportsHybridSearch: true,
+      supportsVisualSearch: true
+    }
+  );
+  const controller = new AdaptiveRetrievalController({ retriever });
+
+  const retrieved = await controller.retrieve(request);
+
+  assert.equal(retriever.calls.length, 2);
+  assert.equal(retriever.calls[1]?.mode, "visual");
+  assert.equal(retrieved.trace.adaptiveStrategy?.retryStrategy, "visual_retrieval");
+  assert.equal(retrieved.trace.adaptiveStrategy?.finalDecision, "retried_answerable");
+});
+
+test("adaptive controller retries thin freshness evidence with freshness expansion", async () => {
+  const request = baseRequest({
+    topK: 2,
+    candidatePoolLimit: 2,
+    intent: {
+      primary: "freshness",
+      secondary: ["troubleshooting"],
+      sourceHints: ["recent", "incidents", "support"]
+    }
+  });
+  const retriever = new SequenceRetriever([
+    result({ request, candidates: [] }),
+    result({
+      request,
+      candidates: [
+        {
+          chunk,
+          indexedAt: FIXED_NOW
+        }
+      ],
+      retrievalId: "retrieval_adaptive_freshness_retry"
+    })
+  ]);
+  const controller = new AdaptiveRetrievalController({ retriever });
+
+  const retrieved = await controller.retrieve(request);
+
+  assert.equal(retriever.calls.length, 2);
+  assert.equal(retriever.calls[1]?.candidatePoolLimit, 20);
+  assert.equal(retriever.calls[1]?.retrievalId, "retrieval_adaptive_freshness_retry");
+  assert.equal(retrieved.trace.adaptiveStrategy?.retryStrategy, "freshness_expansion");
+  assert.equal(retrieved.trace.adaptiveStrategy?.finalDecision, "retried_answerable");
+});
+
+test("adaptive controller diagnoses missing graph evidence and retries candidate expansion", async () => {
+  const request = baseRequest({
+    topK: 2,
+    candidatePoolLimit: 2,
+    graph: {
+      enabled: true,
+      entityHints: ["Child LLC"],
+      relationKinds: ["owns"],
+      executionMode: "graph_first"
+    },
+    intent: {
+      primary: "relationship",
+      sourceHints: ["graph"]
+    }
+  });
+  const retriever = new SequenceRetriever(
+    [
+      result({
+        request,
+        candidates: [
+          {
+            chunk,
+            indexedAt: FIXED_NOW
+          }
+        ]
+      }),
+      result({
+        request,
+        candidates: [
+          {
+            chunk,
+            indexedAt: FIXED_NOW
+          }
+        ],
+        retrievalId: "retrieval_adaptive_graph_retry",
+        withGraphEvidence: true
+      })
+    ],
+    {
+      modes: ["keyword"],
+      supportsVectorSearch: false,
+      supportsHybridSearch: false,
+      supportsGraphSearch: true
+    }
+  );
+  const controller = new AdaptiveRetrievalController({ retriever });
+
+  const retrieved = await controller.retrieve(request);
+
+  assert.equal(retriever.calls.length, 2);
+  assert.equal(retriever.calls[1]?.graph?.executionMode, "graph_first");
+  assert.equal(retriever.calls[1]?.graph?.maxDepth, 2);
+  assert.equal(retriever.calls[1]?.graph?.neighborLimit, 24);
+  assert.equal(retrieved.trace.adaptiveStrategy?.diagnosis.code, "sufficient_candidates");
+  assert.equal(retrieved.trace.adaptiveStrategy?.retryStrategy, "graph_deepening");
+  assert.equal(retrieved.trace.adaptiveStrategy?.finalDecision, "retried_answerable");
+});
+
 class SequenceRetriever implements Retriever {
-  readonly capabilities: RetrieverCapabilities = {
-    modes: ["keyword"],
-    supportsVectorSearch: false,
-    supportsHybridSearch: false
-  };
+  readonly capabilities: RetrieverCapabilities;
 
   readonly calls: RetrievalRequest[] = [];
   private readonly results: RetrievalResult[];
 
-  constructor(results: RetrievalResult[]) {
+  constructor(
+    results: RetrievalResult[],
+    capabilities: RetrieverCapabilities = {
+      modes: ["keyword"],
+      supportsVectorSearch: false,
+      supportsHybridSearch: false
+    }
+  ) {
     this.results = results;
+    this.capabilities = capabilities;
   }
 
   async retrieve(request: RetrievalRequest): Promise<RetrievalResult> {
@@ -138,6 +285,7 @@ function result(input: {
   readonly request: RetrievalRequest;
   readonly candidates: readonly IndexedChunk[];
   readonly retrievalId?: string;
+  readonly withGraphEvidence?: boolean;
 }): RetrievalResult {
   return {
     query: input.request.query,
@@ -147,7 +295,26 @@ function result(input: {
       rank: index + 1,
       matchedTerms: ["refund", "policy"],
       citation: indexed.chunk.citation,
-      reasons: ["stub_match"]
+      reasons: ["stub_match"],
+      ...(input.withGraphEvidence
+        ? {
+            graphEvidence: {
+              seed: { id: "entity_child", name: "Child LLC" },
+              target: { id: "entity_parent", name: "Parent LLC" },
+              depth: 1,
+              edges: [
+                {
+                  relationId: "relation_parent_owns_child",
+                  relationType: "owns",
+                  from: { id: "entity_parent", name: "Parent LLC" },
+                  to: { id: "entity_child", name: "Child LLC" },
+                  depth: 1,
+                  evidenceChunkIds: [indexed.chunk.id]
+                }
+              ]
+            }
+          }
+        : {})
     })),
     rejected: [],
     trace: {

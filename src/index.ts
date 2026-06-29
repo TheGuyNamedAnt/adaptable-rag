@@ -47,8 +47,11 @@ export {
 export { CompanyDeploymentRegistry } from "./company/company-deployment-registry.js";
 export {
   adapterPacksFromModule,
+  defaultCompanyDeploymentExportNames,
   defaultAdapterPackExportNames,
-  loadCompanyDeploymentModule
+  loadCompanyDeploymentModule,
+  resolveCompanyDeploymentAdapterPacks,
+  resolveCompanyDeploymentExport
 } from "./company/company-deployment-module.js";
 export {
   assembleCompanyProductionSourceSyncRuntimes,
@@ -97,7 +100,13 @@ export type {
   CompanyDeploymentRegistryLookup
 } from "./company/company-deployment-registry.js";
 export type {
+  CompanyDeploymentEnvironmentManifest,
+  CompanyDeploymentEvalManifest,
+  CompanyDeploymentExportResolution,
+  CompanyDeploymentExportResolutionOptions,
+  CompanyDeploymentManifest,
   CompanyDeploymentModuleLoadOptions,
+  CompanyDeploymentSmokeManifest,
   LoadedCompanyDeploymentModule
 } from "./company/company-deployment-module.js";
 export type {
@@ -185,6 +194,25 @@ export type {
   GraphValidationResult,
   GraphValidationSeverity
 } from "./graph/graph-validation.js";
+export { assertGraphIntegrity, checkGraphIntegrity } from "./graph/graph-integrity.js";
+export type {
+  GraphIntegrityInput,
+  GraphIntegrityIssue,
+  GraphIntegrityIssueCode,
+  GraphIntegrityOptions,
+  GraphIntegrityResult,
+  GraphIntegritySeverity
+} from "./graph/graph-integrity.js";
+export { checkGraphRecall } from "./graph/graph-recall.js";
+export type {
+  ExpectedGraphEntity,
+  ExpectedGraphRelation,
+  ForbiddenGraphRelation,
+  GraphRecallInput,
+  GraphRecallIssue,
+  GraphRecallResult,
+  GraphRecallThresholds
+} from "./graph/graph-recall.js";
 export { checkRelationEvidenceFaithfulness } from "./graph/relation-evidence-faithfulness.js";
 export type {
   RelationEvidenceFaithfulnessCode,
@@ -324,6 +352,7 @@ export type {
 } from "./graph/graph-extractor.js";
 export { GraphIngestionRunner } from "./graph/graph-ingestion.js";
 export type {
+  GraphIngestionIntegrityOptions,
   GraphIngestionProfileContext,
   GraphIngestionRequest,
   GraphIngestionResult,
@@ -529,6 +558,7 @@ export type {
 export type {
   CorpusRecord,
   CorpusRecordMetadata,
+  CorpusRecordRejectionStage,
   RejectedCorpusRecord
 } from "./corpus/corpus-record.js";
 export { LOCAL_FILES_ADAPTER_ID, LocalFilesCorpusAdapter } from "./corpus/local-files-adapter.js";
@@ -764,6 +794,26 @@ export type {
   IndexStats
 } from "./indexing/index-types.js";
 export {
+  HOSTED_VECTOR_SCALE_CAPABILITIES,
+  LOCAL_INDEX_SCALE_CAPABILITIES,
+  LOCAL_VECTOR_SCALE_CAPABILITIES,
+  POSTGRES_INDEX_SCALE_CAPABILITIES,
+  POSTGRES_VECTOR_SCALE_CAPABILITIES,
+  SQLITE_INDEX_SCALE_CAPABILITIES,
+  isVectorGenerationInventoryProvider,
+  supportedScaleFeature,
+  unsupportedScaleFeature
+} from "./indexing/scale-capabilities.js";
+export type {
+  ScaleFeatureCapability,
+  ScaleFeatureMode,
+  ScalePartitionKey,
+  StorageScaleCapabilities,
+  StorageScaleOperationResult,
+  StorageScaleTopology,
+  VectorGenerationInventoryProvider
+} from "./indexing/scale-capabilities.js";
+export {
   InMemoryVectorStore,
   validateChunkVector,
   validateVectorSearchRequest
@@ -795,6 +845,8 @@ export type {
   IndexedVisualChunkVector,
   InMemoryVisualVectorStoreOptions,
   VisualChunkVector,
+  VisualChunkVectorMetadata,
+  VisualChunkVectorMetadataValue,
   VisualVectorIndexOptions,
   VisualVectorSearchCandidate,
   VisualVectorSearchRejection,
@@ -807,6 +859,14 @@ export type {
   VisualVectorStoreCapabilities,
   VisualVectorStoreOperationResult
 } from "./indexing/visual-vector-store.js";
+export {
+  planVectorGenerationCleanup,
+  vectorGenerationInventory
+} from "./indexing/vector-generation-lifecycle.js";
+export type {
+  VectorGenerationCleanupPlan,
+  VectorGenerationInventoryEntry
+} from "./indexing/vector-generation-lifecycle.js";
 export { JsonFileRagIndex } from "./indexing/json-file-index.js";
 export type { JsonFileRagIndexOptions } from "./indexing/json-file-index.js";
 export { SqliteRagIndex } from "./indexing/sqlite-rag-index.js";
@@ -828,8 +888,10 @@ export {
 } from "./runtime/ingestion-job.js";
 export type {
   CreateIngestionJobInput,
+  IngestionCheckpointListFilter,
   IngestionCheckpointRecord,
   IngestionCheckpointStore,
+  IngestionDocumentProgressListFilter,
   IngestionDocumentProgressRecord,
   IngestionDocumentStatus,
   IngestionJobCounts,
@@ -839,6 +901,7 @@ export type {
   IngestionJobStatus,
   IngestionJobStore,
   IngestionProgressStore,
+  IngestionSourceProgressListFilter,
   IngestionSourceProgressRecord,
   IngestionSourceStatus,
   PostgresIngestionJobStoreOptions,
@@ -847,6 +910,71 @@ export type {
   UpdateIngestionJobInput,
   UpdateIngestionSourceProgressInput
 } from "./runtime/ingestion-job.js";
+export {
+  IndexGenerationPromotionService,
+  InMemoryIndexGenerationStore,
+  InMemoryIngestionJobQueue,
+  InMemoryIngestionLeaseStore,
+  PostgresIndexGenerationStore,
+  PostgresIngestionJobQueue,
+  PostgresIngestionLeaseStore,
+  planGenerationPromotion,
+  planIngestionBackfillJobs,
+  planReindex
+} from "./runtime/ingestion-scale.js";
+export type {
+  AcquireIngestionLeaseInput,
+  CancelIngestionJobInput,
+  ClaimIngestionJobInput,
+  CompleteIngestionJobInput,
+  EnqueueIngestionJobInput,
+  FailIngestionJobInput,
+  GenerationEvalResult,
+  GenerationEvalStatus,
+  GenerationPromotionAction,
+  GenerationPromotionPlan,
+  GenerationPromotionRecord,
+  GenerationPromotionStatus,
+  HeartbeatIngestionLeaseInput,
+  IndexGenerationListFilter,
+  IndexGenerationManifest,
+  IndexGenerationPromotionServiceOptions,
+  IndexGenerationStatus,
+  IndexGenerationStore,
+  IngestionBackfillPlan,
+  IngestionBackfillPlanRequest,
+  IngestionJobQueue,
+  IngestionLeaseRecord,
+  IngestionLeaseStore,
+  IngestionQueueJob,
+  IngestionQueueListFilter,
+  IngestionQueueStatus,
+  PlanIndexGenerationPromotionInput,
+  PlanGenerationPromotionInput,
+  PostgresIngestionScaleStoreOptions,
+  PromoteGenerationInput,
+  RecordGenerationEvalResultInput,
+  RequeueIngestionJobInput,
+  ReindexPlan,
+  ReindexPlanRequest,
+  ReleaseIngestionLeaseInput,
+  SaveGenerationPromotionInput,
+  SaveIndexGenerationManifestInput
+} from "./runtime/ingestion-scale.js";
+export { ProductionIngestionWorker } from "./runtime/ingestion-worker.js";
+export type {
+  IngestionWorkerRunOnceStatus,
+  ProductionIngestionWorkerEvent,
+  ProductionIngestionWorkerOptions,
+  ProductionIngestionWorkerRunLoopInput,
+  ProductionIngestionWorkerRunLoopResult,
+  ProductionIngestionWorkerRunOnceInput,
+  ProductionIngestionWorkerRunOnceResult
+} from "./runtime/ingestion-worker.js";
+export { buildChunkRelationships } from "./ingestion/chunk-relationships.js";
+export type { ChunkRelationship, ChunkRelationshipKind } from "./ingestion/chunk-relationships.js";
+export { buildRetrievalReadinessReport } from "./ingestion/retrieval-readiness.js";
+export type { RetrievalReadinessReport } from "./ingestion/retrieval-readiness.js";
 export { JsonFileVectorStore } from "./indexing/json-file-vector-store.js";
 export type { JsonFileVectorStoreOptions } from "./indexing/json-file-vector-store.js";
 export { JsonFileVisualVectorStore } from "./indexing/json-file-visual-vector-store.js";
@@ -912,11 +1040,14 @@ export type {
 export type {
   PlannedQuery,
   PlannedQueryKind,
+  QueryIntent,
+  QueryIntentKind,
   GraphQueryDirection,
   GraphQueryExecutionMode,
   GraphQueryIntent,
   GraphQueryRelationKind,
   GraphQueryRoute,
+  QuerySourceHint,
   QueryPlan,
   QueryPlanner,
   QueryPlanningModelAdapter,
@@ -1015,6 +1146,16 @@ export {
 export type { AnthropicRerankPresetOptions } from "./retrieval/anthropic-rerank-preset.js";
 export { RerankingRetriever } from "./retrieval/reranking-retriever.js";
 export type { RerankingRetrieverOptions } from "./retrieval/reranking-retriever.js";
+export {
+  AdaptiveModelReranker,
+  adaptiveModelRerankReasons
+} from "./retrieval/adaptive-model-reranker.js";
+export type {
+  AdaptiveModelRerankerOptions,
+  AdaptiveModelRerankReason
+} from "./retrieval/adaptive-model-reranker.js";
+export { ConnectedChunkRetriever } from "./retrieval/connected-chunk-retriever.js";
+export type { ConnectedChunkRetrieverOptions } from "./retrieval/connected-chunk-retriever.js";
 export type {
   RerankMode as RetrieverRerankMode,
   RerankRejection,
@@ -1246,6 +1387,12 @@ export type {
   EmbeddingVector,
   TextEmbedding
 } from "./embeddings/embedding-types.js";
+export {
+  embeddingConfigHashFor,
+  embeddingIdentityFor,
+  embeddingIndexConfigHashFor
+} from "./embeddings/embedding-identity.js";
+export type { EmbeddingIdentity, EmbeddingIdentityInput } from "./embeddings/embedding-identity.js";
 export type {
   VisualEmbedding,
   VisualEmbeddingAdapter,
@@ -1508,12 +1655,16 @@ export {
 } from "./runtime/production-app.js";
 export type {
   LoadProductionRagAppConfigFromEnvOptions,
+  ProductionAssuranceConfig,
+  ProductionGroundingJudgeRequirement,
   ProductionHostedVectorStorageConfig,
   ProductionHttpAuthConfig,
   ProductionHttpAuthMode,
   ProductionHttpConfig,
   ProductionHttpLogMode,
   ProductionHttpOperationsConfig,
+  ProductionHttpPrincipalConfig,
+  ProductionHttpPrincipalMode,
   ProductionHttpRateLimitConfig,
   ProductionHttpRateLimitMode,
   ProductionIndexStorageConfig,
@@ -1597,8 +1748,10 @@ export type {
 export type {
   RagAgentRequest,
   RagAgentResult,
+  RagAgentRetryPlan,
   RagAgentStatus,
   RagAgentStep,
+  RagAgentStepReason,
   RagAgentTrace,
   RagAnswerFailure,
   RagAnswerFailureStage,
@@ -1646,6 +1799,12 @@ export {
   compareEvalBenchmarks,
   renderEvalHtmlReport
 } from "./evals/eval-report.js";
+export { buildEmbeddingMigrationReport } from "./evals/embedding-migration-report.js";
+export type {
+  EmbeddingMigrationDelta,
+  EmbeddingMigrationReport,
+  EmbeddingMigrationThresholds
+} from "./evals/embedding-migration-report.js";
 export type {
   RagEvalBenchmarkSnapshot,
   RagEvalProfileBenchmark,
@@ -1674,6 +1833,45 @@ export type {
   EvalTraceReplayStatus,
   EvalTraceReplayTarget
 } from "./evals/eval-replay.js";
+export {
+  buildDocumentQaBenchmarkReport,
+  evaluateDocumentQaBenchmarkResult,
+  scoreDocumentQaAnswerText
+} from "./parser-benchmarks/document-qa-evaluators.js";
+export {
+  createChartQaParseRequest,
+  loadChartQaCases,
+  loadChartQaCasesFromFile
+} from "./parser-benchmarks/chartqa-loader.js";
+export {
+  createDocVqaParseRequest,
+  loadDocVqaCases,
+  loadDocVqaCasesFromFile
+} from "./parser-benchmarks/docvqa-loader.js";
+export { runDocumentQaRagBenchmark } from "./parser-benchmarks/document-qa-rag-benchmark.js";
+export type {
+  ChartQaLoaderOptions,
+  ChartQaRequestOptions
+} from "./parser-benchmarks/chartqa-loader.js";
+export type {
+  DocVqaLoaderOptions,
+  DocVqaRequestOptions
+} from "./parser-benchmarks/docvqa-loader.js";
+export type { DocumentQaAnswerTextScore } from "./parser-benchmarks/document-qa-evaluators.js";
+export type {
+  DocumentQaRagBenchmarkCaseRequest,
+  RunDocumentQaRagBenchmarkRequest
+} from "./parser-benchmarks/document-qa-rag-benchmark.js";
+export type {
+  DocumentQaBenchmarkCase,
+  DocumentQaBenchmarkCaseEvaluation,
+  DocumentQaBenchmarkDataset,
+  DocumentQaBenchmarkReport,
+  DocumentQaBenchmarkRunResult,
+  DocumentQaBenchmarkThresholds,
+  DocumentQaRagBenchmarkFailureStage,
+  DocumentQaRagBenchmarkMetrics
+} from "./parser-benchmarks/benchmark-types.js";
 export {
   buildRagOperationalSloReport,
   ragOperationalSloRules,
@@ -1806,7 +2004,26 @@ export {
   CommandLayoutParser,
   runCommandLayoutParser
 } from "./parsing/command-layout-parser.js";
+export {
+  EscalatingDocumentParser,
+  escalationParsersForRisks
+} from "./parsing/escalating-parser.js";
+export { compareParserResults, ParserComparisonMode } from "./parsing/parser-comparison.js";
+export { assessParserResultQuality } from "./parsing/parser-result-quality.js";
+export {
+  summarizeLayoutPreservation,
+  withLayoutPreservationMetadata
+} from "./parsing/layout-preservation.js";
+export { auditPagesForOcr, withPageOcrAuditMetadata } from "./parsing/page-ocr-audit.js";
+export {
+  DEFAULT_PARSER_EVAL_CORPUS_CASES,
+  parserEvalCasesByKind
+} from "./parsing/parser-eval-corpus.js";
 export { DelimitedTableParser, parseDelimitedRows } from "./parsing/delimited-table-parser.js";
+export {
+  MarkdownStructureParser,
+  parseMarkdownPipeTables
+} from "./parsing/markdown-structure-parser.js";
 export { SecHtmlParser } from "./parsing/sec-html-parser.js";
 export {
   commandForLocalStructuredParser,
@@ -1821,7 +2038,53 @@ export {
 } from "./parsing/local-parser-presets.js";
 export { DocumentParserRouter } from "./parsing/parser-router.js";
 export { analyzeParserQualityForDocuments } from "./ingestion/parser-quality.js";
+export { buildIngestionIntegrityReport } from "./ingestion/ingestion-integrity.js";
+export type {
+  IngestionIntegrityCounts,
+  IngestionIntegrityIssue,
+  IngestionIntegrityIssueCode,
+  IngestionIntegrityOptions,
+  IngestionIntegrityPostIngestMetrics,
+  IngestionIntegrityReport,
+  IngestionIntegritySeverity,
+  IngestionIntegrityStatus
+} from "./ingestion/ingestion-integrity.js";
+export {
+  buildParserBenchmarkReport,
+  evaluateParserBenchmarkResult
+} from "./parser-benchmarks/parser-evaluators.js";
+export {
+  createOmniDocBenchParseRequest,
+  loadOmniDocBenchCases,
+  loadOmniDocBenchCasesFromFile
+} from "./parser-benchmarks/omnidocbench-loader.js";
+export {
+  createTableBankParseRequest,
+  loadTableBankCases,
+  loadTableBankCasesFromFile
+} from "./parser-benchmarks/tablebank-loader.js";
 export { PlainTextParser } from "./parsing/plain-text-parser.js";
+export type {
+  ParserBenchmarkAnnotation,
+  ParserBenchmarkBox,
+  ParserBenchmarkCase,
+  ParserBenchmarkCaseEvaluation,
+  ParserBenchmarkCaseRequest,
+  ParserBenchmarkDataset,
+  ParserBenchmarkEvaluationScope,
+  ParserBenchmarkPage,
+  ParserBenchmarkReport,
+  ParserBenchmarkRunResult,
+  ParserBenchmarkThresholds
+} from "./parser-benchmarks/benchmark-types.js";
+export type {
+  OmniDocBenchLoaderOptions,
+  OmniDocBenchRequestOptions
+} from "./parser-benchmarks/omnidocbench-loader.js";
+export type {
+  TableBankLoaderOptions,
+  TableBankRequestOptions
+} from "./parser-benchmarks/tablebank-loader.js";
 export type {
   CommandLayoutParserCommand,
   CommandLayoutParserInput,
@@ -1829,7 +2092,39 @@ export type {
   CommandLayoutParserOutput,
   CommandLayoutParserRunner
 } from "./parsing/command-layout-parser.js";
+export type {
+  EscalatingDocumentParserOptions,
+  ParserEscalationCandidate
+} from "./parsing/escalating-parser.js";
+export type {
+  ParserComparisonAttempt,
+  ParserComparisonOptions,
+  ParserComparisonResult
+} from "./parsing/parser-comparison.js";
+export type {
+  ParserResultQuality,
+  ParserResultQualityOptions,
+  ParserResultRisk
+} from "./parsing/parser-result-quality.js";
+export type {
+  LayoutPreservationSummary,
+  PreservedFigureAnchor,
+  PreservedPageAnchor,
+  PreservedTableAnchor
+} from "./parsing/layout-preservation.js";
+export type {
+  PageOcrAuditOptions,
+  PageOcrAuditPage,
+  PageOcrAuditReason,
+  PageOcrAuditResult
+} from "./parsing/page-ocr-audit.js";
+export type {
+  ParserEvalCorpusCase,
+  ParserEvalDocumentKind,
+  ParserEvalExpectation
+} from "./parsing/parser-eval-corpus.js";
 export type { DelimitedTableParserOptions } from "./parsing/delimited-table-parser.js";
+export type { MarkdownStructureParserOptions } from "./parsing/markdown-structure-parser.js";
 export type { SecHtmlParserOptions } from "./parsing/sec-html-parser.js";
 export type {
   LocalDocumentParserPreset,
@@ -1881,10 +2176,17 @@ export {
   isTrustTier,
   isTrustUpgrade,
   leastTrustedTier,
+  resolveTrustTierDecision,
   SOURCE_SENSITIVITIES,
   TRUST_TIERS
 } from "./documents/trust-tier.js";
-export type { SourceSensitivity, TrustPolicy, TrustTier } from "./documents/trust-tier.js";
+export type {
+  SourceSensitivity,
+  TrustPolicy,
+  TrustTier,
+  TrustTierDecision,
+  TrustTierDecisionReason
+} from "./documents/trust-tier.js";
 export {
   accessDecisionAudit,
   assertAccessAllowed,
@@ -1903,6 +2205,17 @@ export type {
   ConnectorAclMappingInput,
   ConnectorAclSourceRef
 } from "./security/connector-acl-mapper.js";
+export {
+  encodeSignedPrincipalPayload,
+  normalizeRequestPrincipal,
+  PrincipalResolutionError,
+  signPrincipalPayload,
+  verifySignedPrincipalPayload
+} from "./security/principal-resolver.js";
+export type {
+  PrincipalNormalizationContext,
+  SignedPrincipalPayload
+} from "./security/principal-resolver.js";
 export type {
   RagRunStatus,
   RagRunTrace,
@@ -1927,8 +2240,10 @@ export type {
   InspectEvalFailureRequest,
   InspectEvalFailureResult,
   InspectIngestionCounts,
+  InspectIngestionPage,
   InspectIngestionRunRequest,
   InspectIngestionRunResult,
+  InspectIngestionRunSummary,
   InspectRetrievalCandidate,
   InspectRetrievalRejection,
   InspectRetrievalResult,

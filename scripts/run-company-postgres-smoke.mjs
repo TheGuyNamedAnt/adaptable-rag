@@ -178,8 +178,8 @@ try {
 function parseArgs(args) {
   const options = {
     modulePath: "dist/company/examples/acme-support.company.js",
-    exportName: "acmeSupportCompanyProfile",
-    adapterPackExportNames: ["acmeSupportAdapterPack"],
+    exportName: "acmeSupportDeployment",
+    adapterPackExportNames: [],
     useCaseId: "support",
     tenantId: "tenant_acme",
     namespaceId: "acme-support",
@@ -339,7 +339,7 @@ function postgresSmokeEnv(input) {
     RAG_VECTOR_DIMENSIONS: String(input.vectorDimensions),
     RAG_VISUAL_VECTOR_KIND: input.baseEnv.RAG_VISUAL_VECTOR_KIND ?? "none",
     RAG_COMPANY_MODULE_PATH: input.options.modulePath,
-    RAG_COMPANY_PROFILE_EXPORT: input.options.exportName,
+    RAG_COMPANY_DEPLOYMENT_EXPORT: input.options.exportName,
     RAG_COMPANY_ADAPTER_PACK_EXPORTS: input.options.adapterPackExportNames.join(","),
     RAG_COMPANY_USE_CASE_ID: input.options.useCaseId,
     RAG_COMPANY_PACK_CONTRACT_MODE: "required"
@@ -410,7 +410,16 @@ async function migrationGate(input) {
   }
 
   const client = new Client({ connectionString: input.database.url });
-  const migrationFiles = ["001_core_storage.sql", "002_vector_hnsw_1536.sql"];
+  const migrationFiles = [
+    "001_core_storage.sql",
+    "002_vector_hnsw_1536.sql",
+    "003_ingestion_failure_stage.sql",
+    "004_admin_trace_history.sql",
+    "005_admin_connector_state.sql",
+    "006_admin_review_queue.sql",
+    "007_ingestion_scale_queue.sql",
+    "008_index_generation_promotions.sql"
+  ];
   try {
     await client.connect();
     if (input.options.resetSchema) {

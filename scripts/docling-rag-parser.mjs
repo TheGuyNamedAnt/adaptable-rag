@@ -1,11 +1,22 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const helperPath = resolve(scriptDir, "docling_rag_parser.py");
-const python = process.env.RAG_DOCLING_PYTHON ?? "python3";
+const localBenchmarkPython = resolve(
+  scriptDir,
+  "..",
+  ".rag",
+  "parser-benchmark-venv",
+  "bin",
+  "python"
+);
+const python =
+  process.env.RAG_DOCLING_PYTHON ??
+  (existsSync(localBenchmarkPython) ? localBenchmarkPython : "python3");
 
 let stdin = "";
 process.stdin.setEncoding("utf8");

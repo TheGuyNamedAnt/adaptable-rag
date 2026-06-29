@@ -21,6 +21,7 @@ export type ProfileValidationCode =
   | "unsafe_model_policy"
   | "unsupported_retrieval_mode"
   | "invalid_retrieval_budget"
+  | "invalid_retrieval_routing"
   | "invalid_context_budget"
   | "unsafe_freshness_policy"
   | "unsafe_citation_policy"
@@ -241,6 +242,41 @@ function validateRetrieval(profile: RagProfile, issues: ProfileValidationIssue[]
       path: "retrieval.maxChunks",
       message: `maxChunks must be between 1 and ${MAX_CHUNKS_LIMIT}.`
     });
+  }
+
+  const sourceIds = new Set(profile.corpusSources.map((source) => source.id));
+  for (const [hint, route] of Object.entries(profile.retrieval.sourceHintRoutes ?? {})) {
+    const path = `retrieval.sourceHintRoutes.${hint}`;
+    if (route.mode !== "filter" && route.mode !== "prefer") {
+      issues.push({
+        severity: "error",
+        code: "invalid_retrieval_routing",
+        path: `${path}.mode`,
+        message: `Source hint route "${hint}" must use mode "filter" or "prefer".`
+      });
+    }
+
+    for (const sourceId of route.sourceIds ?? []) {
+      if (!sourceIds.has(sourceId)) {
+        issues.push({
+          severity: "error",
+          code: "invalid_retrieval_routing",
+          path: `${path}.sourceIds`,
+          message: `Source hint route "${hint}" references unknown corpus source "${sourceId}".`
+        });
+      }
+    }
+
+    for (const trustTier of route.trustTiers ?? []) {
+      if (!isKnownTrustTier(trustTier)) {
+        issues.push({
+          severity: "error",
+          code: "invalid_retrieval_routing",
+          path: `${path}.trustTiers`,
+          message: `Source hint route "${hint}" references unknown trust tier "${trustTier}".`
+        });
+      }
+    }
   }
 }
 

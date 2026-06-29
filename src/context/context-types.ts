@@ -29,10 +29,17 @@ export type ContextEvidenceStatus =
 export interface ContextBuildRequest {
   readonly profile: ValidatedRagProfile;
   readonly retrieval: RetrievalResult;
+  readonly queryIntent?: ContextQueryIntent;
   readonly maxContextTokens?: number;
   readonly includeRejected?: boolean;
   readonly contextId?: string;
   readonly requestedAt?: string;
+}
+
+export interface ContextQueryIntent {
+  readonly primary: string;
+  readonly secondary?: readonly string[];
+  readonly sourceHints?: readonly string[];
 }
 
 export interface ContextBlock {

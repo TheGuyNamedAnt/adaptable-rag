@@ -24,10 +24,17 @@ const VECTOR: ChunkVector = {
   namespaceId: "support",
   textHash: "hash_refund",
   embeddingModel: "model",
+  embeddingProvider: "provider",
+  embeddingConfigHash: "embedding_config_hash",
   dimensions: 3,
   vector: [0.1, 0.2, 0.3],
   embeddedAt: "2026-06-23T00:00:00.000Z"
 };
+const VECTOR_IDENTITY = {
+  embeddingModel: "model",
+  embeddingProvider: "provider",
+  embeddingConfigHash: "embedding_config_hash"
+} as const;
 
 class HeadersRecord implements HostedVectorFetchResponseHeaders {
   constructor(private readonly headers: Readonly<Record<string, string>> = {}) {}
@@ -88,6 +95,8 @@ function metadata() {
     namespaceId: VECTOR.namespaceId,
     textHash: VECTOR.textHash,
     embeddingModel: VECTOR.embeddingModel,
+    embeddingProvider: VECTOR.embeddingProvider,
+    embeddingConfigHash: VECTOR.embeddingConfigHash,
     embeddedAt: VECTOR.embeddedAt,
     dimensions: VECTOR.dimensions,
     indexedAt: "2026-06-23T00:01:00.000Z"
@@ -136,7 +145,8 @@ test("Pinecone transport maps hosted vector requests and parses metadata-backed 
     vector: VECTOR.vector,
     tenantId: VECTOR.tenantId,
     namespaceId: VECTOR.namespaceId,
-    topK: 5
+    topK: 5,
+    ...VECTOR_IDENTITY
   });
 
   assert.equal(upserted.results[0]?.accepted, true);
@@ -160,7 +170,10 @@ test("Pinecone transport maps hosted vector requests and parses metadata-backed 
   };
   assert.deepEqual(queryBody.filter, {
     tenantId: { $eq: VECTOR.tenantId },
-    namespaceId: { $eq: VECTOR.namespaceId }
+    namespaceId: { $eq: VECTOR.namespaceId },
+    embeddingModel: { $eq: VECTOR.embeddingModel },
+    embeddingProvider: { $eq: VECTOR.embeddingProvider },
+    embeddingConfigHash: { $eq: VECTOR.embeddingConfigHash }
   });
   assert.equal(JSON.stringify(queryBody).includes("user_1"), false);
 });
@@ -202,7 +215,8 @@ test("Qdrant transport uses point payloads and named vectors", async () => {
     tenantId: VECTOR.tenantId,
     namespaceId: VECTOR.namespaceId,
     topK: 3,
-    minScore: 0.5
+    minScore: 0.5,
+    ...VECTOR_IDENTITY
   });
   await transport.deleteByDocument({ documentId: VECTOR.documentId });
 
@@ -227,7 +241,10 @@ test("Qdrant transport uses point payloads and named vectors", async () => {
     filter: {
       must: [
         { key: "tenantId", match: { value: VECTOR.tenantId } },
-        { key: "namespaceId", match: { value: VECTOR.namespaceId } }
+        { key: "namespaceId", match: { value: VECTOR.namespaceId } },
+        { key: "embeddingModel", match: { value: VECTOR.embeddingModel } },
+        { key: "embeddingProvider", match: { value: VECTOR.embeddingProvider } },
+        { key: "embeddingConfigHash", match: { value: VECTOR.embeddingConfigHash } }
       ]
     },
     limit: 3,
@@ -281,7 +298,8 @@ test("Weaviate transport uses batch objects, GraphQL nearVector, and delete coun
     vector: VECTOR.vector,
     tenantId: VECTOR.tenantId,
     namespaceId: VECTOR.namespaceId,
-    topK: 2
+    topK: 2,
+    ...VECTOR_IDENTITY
   });
   const deleted = await transport.deleteByDocument({ documentId: VECTOR.documentId });
 
@@ -304,6 +322,9 @@ test("Weaviate transport uses batch objects, GraphQL nearVector, and delete coun
   const graphQlQuery = (http.calls[1]?.body as { readonly query: string }).query;
   assert.equal(graphQlQuery.includes("nearVector"), true);
   assert.equal(graphQlQuery.includes("tenantId"), true);
+  assert.equal(graphQlQuery.includes("embeddingModel"), true);
+  assert.equal(graphQlQuery.includes("embeddingProvider"), true);
+  assert.equal(graphQlQuery.includes("embeddingConfigHash"), true);
   assert.equal(graphQlQuery.includes("user_1"), false);
   assert.equal(queried.matches[0]?.score, 0.77);
   assert.equal(http.calls[2]?.init.method, "DELETE");
@@ -351,7 +372,8 @@ test("pgvector RPC transport uses PostgREST upsert, delete, and match RPC shapes
     tenantId: VECTOR.tenantId,
     namespaceId: VECTOR.namespaceId,
     topK: 4,
-    minScore: 0.7
+    minScore: 0.7,
+    ...VECTOR_IDENTITY
   });
 
   assert.equal(http.calls[0]?.url, "https://supabase.example.test/rest/v1/rag_vectors");
@@ -381,7 +403,10 @@ test("pgvector RPC transport uses PostgREST upsert, delete, and match RPC shapes
     match_count: 4,
     match_threshold: 0.7,
     tenant_id: VECTOR.tenantId,
-    namespace_id: VECTOR.namespaceId
+    namespace_id: VECTOR.namespaceId,
+    embedding_model: VECTOR.embeddingModel,
+    embedding_provider: VECTOR.embeddingProvider,
+    embedding_config_hash: VECTOR.embeddingConfigHash
   });
   assert.equal(queried.matches[0]?.score, 0.93);
   assert.equal(queried.matches[0]?.chunkId, VECTOR.chunkId);

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 
@@ -31,6 +32,7 @@ import { FakeModelAdapter, type FakeModelAdapterOptions } from "../model/fake-mo
 import type { RagProfile } from "../profiles/profile.js";
 import { assertValidProfile, type ValidatedRagProfile } from "../profiles/profile-validation.js";
 import type { RetrievalMode } from "../retrieval/retrieval-types.js";
+import type { AdaptiveRetrievalStrategy } from "../retrieval/retrieval-types.js";
 import { setupLocalEvalKnowledgeMap } from "../runtime/eval-knowledge-map.js";
 import { createLocalEvalRuntime } from "../runtime/eval-runtime-factory.js";
 import type { RagAnswerResult } from "../runtime/runtime-types.js";
@@ -98,6 +100,40 @@ const CONTEXT_REJECTION_CODES = [
 
 const RETRIEVAL_MODES = ["keyword", "vector", "hybrid", "visual"] as const;
 const EVAL_RETRIEVAL_MODES = ["profile", "keyword", "visual"] as const;
+const QUERY_INTENTS = [
+  "general",
+  "definition",
+  "troubleshooting",
+  "comparison",
+  "policy",
+  "relationship",
+  "freshness",
+  "table",
+  "visual",
+  "procedural"
+] as const;
+const QUERY_SOURCE_HINTS = [
+  "docs",
+  "support",
+  "tickets",
+  "incidents",
+  "tables",
+  "visuals",
+  "graph",
+  "recent"
+] as const;
+const GRAPH_ROUTES = ["none", "graph_optional", "graph_required"] as const;
+const ADAPTIVE_RETRIEVAL_STRATEGIES = [
+  "keyword_only",
+  "vector_only",
+  "hybrid",
+  "graph_augmented",
+  "visual_retrieval",
+  "graph_deepening",
+  "freshness_expansion",
+  "expanded_candidate_pool",
+  "refuse_missing_or_denied"
+] as const satisfies readonly AdaptiveRetrievalStrategy[];
 const GRAPH_FACT_STRENGTHS = [
   "explicit_fact",
   "inferred_fact",
@@ -701,8 +737,141 @@ function assertCheckSpecificExpectations(
           failures.push("extraction_quality requires an extraction fixture.");
         }
         break;
+      case "query_planning":
+        failures.push(...assertQueryPlanning(evalCase, answer));
+        break;
+      case "evidence_strategy":
+        failures.push(...assertEvidenceStrategy(evalCase, answer));
+        break;
       default:
         break;
+    }
+  }
+
+  return failures;
+}
+
+function assertQueryPlanning(
+  evalCase: LoadedRagEvalCase,
+  answer: RagAnswerResult
+): readonly string[] {
+  const failures: string[] = [];
+  const event = answer.trace.events.find((candidate) => candidate.kind === "query_planned");
+  if (!event) {
+    return ["query_planning requires a query_planned trace event."];
+  }
+
+  const hasExpectation =
+    evalCase.expect.requiredPrimaryIntent !== undefined ||
+    evalCase.expect.requiredGraphRoute !== undefined ||
+    Boolean(evalCase.expect.requiredSecondaryIntents?.length) ||
+    Boolean(evalCase.expect.requiredSourceHints?.length);
+
+  if (!hasExpectation) {
+    failures.push("query_planning requires at least one query planning expectation.");
+  }
+
+  if (
+    evalCase.expect.requiredPrimaryIntent !== undefined &&
+    event.data?.["primaryIntent"] !== evalCase.expect.requiredPrimaryIntent
+  ) {
+    failures.push(
+      `query_planning expected primary intent "${evalCase.expect.requiredPrimaryIntent}" but got "${String(event.data?.["primaryIntent"])}".`
+    );
+  }
+
+  if (
+    evalCase.expect.requiredGraphRoute !== undefined &&
+    event.data?.["graphRoute"] !== evalCase.expect.requiredGraphRoute
+  ) {
+    failures.push(
+      `query_planning expected graph route "${evalCase.expect.requiredGraphRoute}" but got "${String(event.data?.["graphRoute"])}".`
+    );
+  }
+
+  if (evalCase.expect.requiredSecondaryIntents?.length) {
+    const secondaryIntentHashes = new Set(stringArrayValue(event.data?.["secondaryIntentHashes"]));
+    for (const intent of evalCase.expect.requiredSecondaryIntents) {
+      if (!secondaryIntentHashes.has(hashText(intent))) {
+        failures.push(`query_planning expected secondary intent "${intent}".`);
+      }
+    }
+  }
+
+  if (evalCase.expect.requiredSourceHints?.length) {
+    const sourceHintHashes = new Set(stringArrayValue(event.data?.["sourceHintHashes"]));
+    for (const hint of evalCase.expect.requiredSourceHints) {
+      if (!sourceHintHashes.has(hashText(hint))) {
+        failures.push(`query_planning expected source hint "${hint}".`);
+      }
+    }
+  }
+
+  return failures;
+}
+
+function assertEvidenceStrategy(
+  evalCase: LoadedRagEvalCase,
+  answer: RagAnswerResult
+): readonly string[] {
+  if (!hasRetrieval(answer)) {
+    return ["evidence_strategy requires completed retrieval."];
+  }
+
+  const failures: string[] = [];
+  const strategy = answer.retrieval.trace.adaptiveStrategy;
+  if (
+    evalCase.expect.requiredAdaptiveRetryStrategy !== undefined ||
+    evalCase.expect.requiredAdaptiveDiagnosisCode !== undefined
+  ) {
+    if (!strategy) {
+      failures.push("evidence_strategy requires adaptive retrieval trace.");
+    } else {
+      if (
+        evalCase.expect.requiredAdaptiveRetryStrategy !== undefined &&
+        strategy.retryStrategy !== evalCase.expect.requiredAdaptiveRetryStrategy
+      ) {
+        failures.push(
+          `evidence_strategy expected retry strategy "${evalCase.expect.requiredAdaptiveRetryStrategy}" but got "${String(strategy.retryStrategy)}".`
+        );
+      }
+
+      if (
+        evalCase.expect.requiredAdaptiveDiagnosisCode !== undefined &&
+        strategy.diagnosis.code !== evalCase.expect.requiredAdaptiveDiagnosisCode
+      ) {
+        failures.push(
+          `evidence_strategy expected diagnosis "${evalCase.expect.requiredAdaptiveDiagnosisCode}" but got "${strategy.diagnosis.code}".`
+        );
+      }
+    }
+  }
+
+  if (
+    evalCase.expect.requiredFreshnessTraceApplied !== undefined ||
+    evalCase.expect.minimumFreshnessBoostedCandidates !== undefined
+  ) {
+    const freshness = answer.retrieval.trace.freshness;
+    if (!freshness) {
+      failures.push("evidence_strategy expected freshness trace.");
+    } else {
+      if (
+        evalCase.expect.requiredFreshnessTraceApplied !== undefined &&
+        freshness.applied !== evalCase.expect.requiredFreshnessTraceApplied
+      ) {
+        failures.push(
+          `evidence_strategy expected freshness trace applied "${evalCase.expect.requiredFreshnessTraceApplied}" but got "${freshness.applied}".`
+        );
+      }
+
+      if (
+        evalCase.expect.minimumFreshnessBoostedCandidates !== undefined &&
+        freshness.boostedCandidateCount < evalCase.expect.minimumFreshnessBoostedCandidates
+      ) {
+        failures.push(
+          `evidence_strategy expected at least ${evalCase.expect.minimumFreshnessBoostedCandidates} freshness-boosted candidates but got ${freshness.boostedCandidateCount}.`
+        );
+      }
     }
   }
 
@@ -1829,9 +1998,37 @@ function parseExpectation(
     filePath,
     lineNumber
   );
+  const requiredPrimaryIntent = optionalString(
+    record,
+    "requiredPrimaryIntent",
+    filePath,
+    lineNumber
+  );
+  const requiredGraphRoute = optionalString(record, "requiredGraphRoute", filePath, lineNumber);
+  const requiredAdaptiveRetryStrategy = optionalString(
+    record,
+    "requiredAdaptiveRetryStrategy",
+    filePath,
+    lineNumber
+  );
+  const requiredAdaptiveDiagnosisCode = optionalString(
+    record,
+    "requiredAdaptiveDiagnosisCode",
+    filePath,
+    lineNumber
+  );
+  const requiredFreshnessTraceApplied = optionalBoolean(
+    record,
+    "requiredFreshnessTraceApplied",
+    filePath,
+    lineNumber
+  );
   let expectedStatus: (typeof RAG_RUN_STATUSES)[number] | undefined;
   let expectedContextStatus: (typeof CONTEXT_EVIDENCE_STATUSES)[number] | undefined;
   let expectedRetrievalMode: RetrievalMode | undefined;
+  let expectedPrimaryIntent: (typeof QUERY_INTENTS)[number] | undefined;
+  let expectedGraphRoute: (typeof GRAPH_ROUTES)[number] | undefined;
+  let expectedAdaptiveRetryStrategy: AdaptiveRetrievalStrategy | undefined;
 
   if (status) {
     if (!includesString(RAG_RUN_STATUSES, status)) {
@@ -1861,6 +2058,54 @@ function parseExpectation(
     }
     expectedRetrievalMode = requiredRetrievalMode;
   }
+
+  if (requiredPrimaryIntent) {
+    if (!includesString(QUERY_INTENTS, requiredPrimaryIntent)) {
+      throw new RagEvalParseError(
+        `Unsupported expected primary intent "${requiredPrimaryIntent}".`,
+        filePath,
+        lineNumber
+      );
+    }
+    expectedPrimaryIntent = requiredPrimaryIntent;
+  }
+
+  if (requiredGraphRoute) {
+    if (!includesString(GRAPH_ROUTES, requiredGraphRoute)) {
+      throw new RagEvalParseError(
+        `Unsupported expected graph route "${requiredGraphRoute}".`,
+        filePath,
+        lineNumber
+      );
+    }
+    expectedGraphRoute = requiredGraphRoute;
+  }
+
+  if (requiredAdaptiveRetryStrategy) {
+    if (!includesString(ADAPTIVE_RETRIEVAL_STRATEGIES, requiredAdaptiveRetryStrategy)) {
+      throw new RagEvalParseError(
+        `Unsupported expected adaptive retry strategy "${requiredAdaptiveRetryStrategy}".`,
+        filePath,
+        lineNumber
+      );
+    }
+    expectedAdaptiveRetryStrategy = requiredAdaptiveRetryStrategy;
+  }
+
+  const expectedSecondaryIntents = parseStringEnumArray(
+    record,
+    "requiredSecondaryIntents",
+    QUERY_INTENTS,
+    filePath,
+    lineNumber
+  );
+  const expectedSourceHints = parseStringEnumArray(
+    record,
+    "requiredSourceHints",
+    QUERY_SOURCE_HINTS,
+    filePath,
+    lineNumber
+  );
 
   const rejectionCodes = optionalStringArray(
     record,
@@ -1893,6 +2138,16 @@ function parseExpectation(
     ...optionalStringArrayRecord(record, "requiredEscalationRuleIds", filePath, lineNumber),
     ...optionalNumberRecord(record, "maximumEstimatedCostUsd", filePath, lineNumber),
     ...(expectedRetrievalMode ? { requiredRetrievalMode: expectedRetrievalMode } : {}),
+    ...(expectedPrimaryIntent ? { requiredPrimaryIntent: expectedPrimaryIntent } : {}),
+    ...(expectedSecondaryIntents ? { requiredSecondaryIntents: expectedSecondaryIntents } : {}),
+    ...(expectedSourceHints ? { requiredSourceHints: expectedSourceHints } : {}),
+    ...(expectedGraphRoute ? { requiredGraphRoute: expectedGraphRoute } : {}),
+    ...(expectedAdaptiveRetryStrategy
+      ? { requiredAdaptiveRetryStrategy: expectedAdaptiveRetryStrategy }
+      : {}),
+    ...(requiredAdaptiveDiagnosisCode ? { requiredAdaptiveDiagnosisCode } : {}),
+    ...(requiredFreshnessTraceApplied === undefined ? {} : { requiredFreshnessTraceApplied }),
+    ...optionalNumberRecord(record, "minimumFreshnessBoostedCandidates", filePath, lineNumber),
     ...optionalNumberRecord(record, "minimumVisualCitations", filePath, lineNumber),
     ...optionalStringArrayRecord(record, "requiredCitationLayoutRegionIds", filePath, lineNumber),
     ...optionalStringArrayRecord(record, "requiredLayoutRelationIds", filePath, lineNumber),
@@ -2325,6 +2580,31 @@ function optionalStringArrayRecord(
   return value ? { [key]: value } : {};
 }
 
+function parseStringEnumArray<Value extends string>(
+  record: Readonly<Record<string, unknown>>,
+  key: string,
+  values: readonly Value[],
+  filePath: string,
+  lineNumber: number
+): readonly Value[] | undefined {
+  const entries = optionalStringArray(record, key, filePath, lineNumber);
+  if (entries === undefined) {
+    return undefined;
+  }
+
+  return entries.map((entry) => {
+    if (!includesString(values, entry)) {
+      throw new RagEvalParseError(
+        `${key} contains unsupported value "${entry}".`,
+        filePath,
+        lineNumber
+      );
+    }
+
+    return entry;
+  });
+}
+
 function optionalNumberRecord(
   record: Readonly<Record<string, unknown>>,
   key: string,
@@ -2510,6 +2790,18 @@ function hasGeneration(
   answer: RagAnswerResult
 ): answer is Extract<RagAnswerResult, { readonly generation: unknown }> {
   return "generation" in answer;
+}
+
+function stringArrayValue(value: unknown): readonly string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.filter((item): item is string => typeof item === "string");
+}
+
+function hashText(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
 function resolveEvalPath(projectRoot: string, evalPath: string): string {

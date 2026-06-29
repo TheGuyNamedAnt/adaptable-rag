@@ -1,6 +1,9 @@
 coverage/
 dist/
 node_modules/
+admin/.next/
+admin/out/
+admin/tsconfig.tsbuildinfo
 .rag/
 .Codex/
 .env

@@ -33,6 +33,8 @@ test("plans original, low-level, and high-level queries when profile allows para
   assert.equal(plan.highLevelKeywords.includes("risk"), true);
   assert.equal(plan.trace.queryPlanId, "query_plan_test");
   assert.equal(plan.trace.queryCount, 3);
+  assert.equal(plan.intent.primary, "general");
+  assert.equal(plan.trace.primaryIntent, "general");
   assert.equal(plan.trace.plannedQueryHashes.length, 3);
   assert.equal(JSON.stringify(plan.trace).includes("Acme Corp"), false);
   assert.equal(JSON.stringify(plan.trace).includes("customer concentration"), false);
@@ -58,6 +60,10 @@ test("marks ownership questions as graph-required and adds a graph planned query
   });
 
   assert.equal(plan.graphIntent.route, "graph_required");
+  assert.equal(plan.intent.primary, "relationship");
+  assert.equal(plan.intent.sourceHints.includes("graph"), true);
+  assert.equal(plan.trace.primaryIntent, "relationship");
+  assert.equal(plan.trace.sourceHintHashes.length > 0, true);
   assert.equal(plan.graphIntent.direction, "incoming");
   assert.equal(plan.graphIntent.executionMode, "graph_first");
   assert.equal(plan.graphIntent.relationKinds.includes("owns"), true);
@@ -72,6 +78,60 @@ test("marks ownership questions as graph-required and adds a graph planned query
   assert.equal(plan.trace.graphExecutionMode, "graph_first");
   assert.equal(plan.trace.graphRelationKindHashes.length > 0, true);
   assert.equal(JSON.stringify(plan.trace).includes("Child LLC"), false);
+});
+
+test("classifies troubleshooting questions and suggests support source hints", () => {
+  const profile = assertValidProfile({
+    ...genericDocsProfile,
+    retrieval: {
+      ...genericDocsProfile.retrieval,
+      allowQueryRewrite: true,
+      allowParallelQueries: true
+    }
+  });
+  const planner = new DefaultQueryPlanner({ now: () => FIXED_NOW });
+
+  const plan = planner.plan({
+    profile,
+    question: "Why can't customers reset passwords after the latest login update?",
+    queryPlanId: "query_plan_troubleshooting",
+    requestedAt: FIXED_NOW
+  });
+
+  assert.equal(plan.intent.primary, "freshness");
+  assert.equal(plan.intent.secondary.includes("troubleshooting"), true);
+  assert.equal(plan.intent.sourceHints.includes("support"), true);
+  assert.equal(plan.intent.sourceHints.includes("tickets"), true);
+  assert.equal(plan.intent.sourceHints.includes("recent"), true);
+  assert.equal(plan.trace.primaryIntent, "freshness");
+  assert.equal(JSON.stringify(plan.trace).includes("passwords"), false);
+});
+
+test("classifies table and visual questions for future source-aware routing", () => {
+  const profile = assertValidProfile({
+    ...genericDocsProfile,
+    retrieval: {
+      ...genericDocsProfile.retrieval,
+      allowQueryRewrite: true,
+      allowParallelQueries: true
+    }
+  });
+  const planner = new DefaultQueryPlanner({ now: () => FIXED_NOW });
+
+  const plan = planner.plan({
+    profile,
+    question: "Compare the chart and spreadsheet table for Q4 revenue.",
+    queryPlanId: "query_plan_visual_table",
+    requestedAt: FIXED_NOW
+  });
+
+  assert.equal(plan.intent.primary, "comparison");
+  assert.equal(plan.intent.secondary.includes("table"), true);
+  assert.equal(plan.intent.secondary.includes("visual"), true);
+  assert.equal(plan.intent.sourceHints.includes("tables"), true);
+  assert.equal(plan.intent.sourceHints.includes("visuals"), true);
+  assert.equal(plan.trace.secondaryIntentHashes.length >= 2, true);
+  assert.equal(JSON.stringify(plan.trace).includes("Q4 revenue"), false);
 });
 
 test("marks subsidiary ownership questions as outgoing graph traversal", () => {

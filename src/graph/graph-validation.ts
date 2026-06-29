@@ -9,6 +9,7 @@ export type GraphValidationCode =
   | "namespace_mismatch"
   | "invalid_confidence"
   | "missing_evidence"
+  | "duplicate_id"
   | "unknown_relation_entity"
   | "inferred_relation_disallowed"
   | "invalid_temporal_validity";
@@ -43,6 +44,9 @@ export function validateGraphExtractionBatch(batch: GraphExtractionBatch): Graph
   const entityIds = new Set<string>();
   for (const [index, entity] of batch.entities.entries()) {
     const path = `entities[${index}]`;
+    if (entityIds.has(entity.id)) {
+      issues.push(error("duplicate_id", `${path}.id`, `Duplicate entity id "${entity.id}".`));
+    }
     entityIds.add(entity.id);
 
     if (entity.namespaceId !== batch.namespaceId) {
@@ -68,8 +72,13 @@ export function validateGraphExtractionBatch(batch: GraphExtractionBatch): Graph
     }
   }
 
+  const relationIds = new Set<string>();
   for (const [index, relation] of batch.relations.entries()) {
     const path = `relations[${index}]`;
+    if (relationIds.has(relation.id)) {
+      issues.push(error("duplicate_id", `${path}.id`, `Duplicate relation id "${relation.id}".`));
+    }
+    relationIds.add(relation.id);
 
     if (relation.namespaceId !== batch.namespaceId) {
       issues.push(

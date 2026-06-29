@@ -4,6 +4,7 @@ export type ChunkLocatorStrategy = "character_range" | "line_range" | "paragraph
 
 export interface ChunkingPolicy {
   readonly id: string;
+  readonly version?: string;
   readonly maxCharacters: number;
   readonly overlapCharacters: number;
   readonly minCharacters: number;
@@ -18,10 +19,11 @@ export interface ChunkingPolicy {
 
 export const DEFAULT_CHUNKING_POLICY: ChunkingPolicy = {
   id: "default-safe-chunking",
+  version: "1",
   maxCharacters: 1800,
   overlapCharacters: 180,
   minCharacters: 120,
-  maxChunksPerDocument: 500,
+  maxChunksPerDocument: 1500,
   boundaryStrategy: "paragraph",
   locatorStrategy: "character_range",
   preserveWhitespace: true,

@@ -5,6 +5,9 @@ import type {
   GraphQueryIntent,
   GraphQueryRelationKind,
   PlannedQuery,
+  QueryIntent,
+  QueryIntentKind,
+  QuerySourceHint,
   QueryPlan,
   QueryPlanRequest,
   QueryPlanner
@@ -130,6 +133,7 @@ export class DefaultQueryPlanner implements QueryPlanner {
     const lowLevelKeywords = extractLowLevelKeywords(question);
     const highLevelKeywords = extractHighLevelKeywords(question, lowLevelKeywords);
     const graphIntent = detectGraphQueryIntent(question, lowLevelKeywords);
+    const intent = classifyQueryIntent(question, graphIntent);
     const queries = buildPlannedQueries({
       question,
       lowLevelKeywords,
@@ -142,6 +146,7 @@ export class DefaultQueryPlanner implements QueryPlanner {
 
     return {
       originalQuestion: question,
+      intent,
       lowLevelKeywords,
       highLevelKeywords,
       graphIntent,
@@ -155,6 +160,10 @@ export class DefaultQueryPlanner implements QueryPlanner {
         plannedQueryHashes: queries.map((query) => hashText(query.query)),
         lowLevelKeywordHashes: lowLevelKeywords.map(hashText),
         highLevelKeywordHashes: highLevelKeywords.map(hashText),
+        primaryIntent: intent.primary,
+        secondaryIntentHashes: intent.secondary.map(hashText),
+        sourceHintHashes: intent.sourceHints.map(hashText),
+        intentConfidence: intent.confidence,
         graphRoute: graphIntent.route,
         ...(graphIntent.direction === undefined ? {} : { graphDirection: graphIntent.direction }),
         ...(graphIntent.executionMode === undefined
@@ -168,6 +177,79 @@ export class DefaultQueryPlanner implements QueryPlanner {
       }
     };
   }
+}
+
+export function classifyQueryIntent(question: string, graphIntent: GraphQueryIntent): QueryIntent {
+  const matched: QueryIntentKind[] = [];
+  const sourceHints = new Set<QuerySourceHint>();
+
+  if (graphIntent.route !== "none") {
+    matched.push("relationship");
+    sourceHints.add("graph");
+  }
+  if (
+    /\b(?:latest|recent|current|today|yesterday|last\s+(?:week|month|quarter|year)|newest)\b/i.test(
+      question
+    )
+  ) {
+    matched.push("freshness");
+    sourceHints.add("recent");
+    sourceHints.add("incidents");
+  }
+  if (
+    /\b(?:policy|policies|allowed|allow|deny|forbidden|rule|rules|compliance|refund|sla)\b/i.test(
+      question
+    )
+  ) {
+    matched.push("policy");
+    sourceHints.add("docs");
+  }
+  if (
+    /\b(?:error|fail(?:ed|ing)?|cannot|can't|unable|broken|issue|bug|troubleshoot|fix|why\s+(?:is|are|did|does|can't|cannot))\b/i.test(
+      question
+    )
+  ) {
+    matched.push("troubleshooting");
+    sourceHints.add("support");
+    sourceHints.add("tickets");
+  }
+  if (/\b(?:compare|versus|vs\.?|difference|different|better|worse|between)\b/i.test(question)) {
+    matched.push("comparison");
+  }
+  if (/\b(?:what\s+is|define|meaning|explain|overview)\b/i.test(question)) {
+    matched.push("definition");
+    sourceHints.add("docs");
+  }
+  if (/\b(?:how\s+to|steps?|procedure|runbook|setup|configure|deploy|install)\b/i.test(question)) {
+    matched.push("procedural");
+    sourceHints.add("docs");
+  }
+  if (/\b(?:table|spreadsheet|row|column|cell|sheet|csv|xlsx)\b/i.test(question)) {
+    matched.push("table");
+    sourceHints.add("tables");
+  }
+  if (/\b(?:image|visual|figure|chart|diagram|screenshot|page\s+image)\b/i.test(question)) {
+    matched.push("visual");
+    sourceHints.add("visuals");
+  }
+
+  const uniqueIntents = uniqueIntentKinds(matched);
+  const primary = uniqueIntents[0] ?? "general";
+  const secondary = uniqueIntents.slice(1);
+  if (sourceHints.size === 0) {
+    sourceHints.add("docs");
+  }
+
+  return {
+    primary,
+    secondary,
+    sourceHints: [...sourceHints].sort(),
+    confidence: primary === "general" ? 0.35 : Math.min(0.95, 0.6 + uniqueIntents.length * 0.1),
+    reason:
+      primary === "general"
+        ? "No specialized query intent pattern detected."
+        : "Question matched deterministic query intent patterns."
+  };
 }
 
 function buildPlannedQueries(input: {
@@ -331,6 +413,10 @@ function uniqueGraphRelationKinds(
   values: readonly GraphQueryRelationKind[]
 ): readonly GraphQueryRelationKind[] {
   return [...new Set(values)].sort();
+}
+
+function uniqueIntentKinds(values: readonly QueryIntentKind[]): readonly QueryIntentKind[] {
+  return [...new Set(values)];
 }
 
 function normalizeQuestion(question: string): string {

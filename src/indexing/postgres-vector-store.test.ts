@@ -49,6 +49,22 @@ test("postgres vector store indexes, searches, counts, and deletes pgvector rows
   assert.equal(vectorStore.capabilities.storageKind, "postgres");
   assert.equal(indexed.indexedVectorCount, chunks.length);
   assert.equal(await vectorStore.vectorCount(), chunks.length);
+  assert.deepEqual(
+    (await vectorStore.vectorGenerationInventory()).map((entry) => ({
+      provider: entry.embeddingProvider,
+      model: entry.embeddingModel,
+      hash: entry.embeddingConfigHash,
+      vectors: entry.vectorCount
+    })),
+    [
+      {
+        provider: adapter.provider,
+        model: adapter.modelName,
+        hash: result.candidates[0]?.vector.embeddingConfigHash,
+        vectors: chunks.length
+      }
+    ]
+  );
   assert.equal(result.candidates.length, 1);
   assert.equal(result.candidates[0]?.chunk.documentId, "doc_postgres_vector_refund");
   assert.equal(result.candidates[0]?.reasons[0], "pgvector_cosine_similarity");
@@ -64,29 +80,113 @@ test("postgres vector store indexes, searches, counts, and deletes pgvector rows
   );
 });
 
+test("postgres vector store rejects legacy rows missing required embedding config hash", async () => {
+  const document = makeDocument({
+    id: "doc_postgres_legacy_vector",
+    body: "Refund billing policy requires support review."
+  });
+  const chunks = chunkDocument({ document }).chunks;
+  const [chunk] = chunks;
+  assert.ok(chunk);
+  const chunkIndex = new InMemoryRagIndex({ now: () => FIXED_NOW });
+  chunkIndex.addDocument(document);
+  chunkIndex.addChunks(document.id, chunks);
+
+  const pool = new MockPgVectorPool();
+  pool.insertRow({
+    id: "legacy_vector",
+    chunk_id: chunk.id,
+    document_id: chunk.documentId,
+    tenant_id: chunk.accessScope.tenantId,
+    namespace_id: chunk.namespaceId,
+    text_hash: chunk.textHash,
+    embedding_model: "same-model",
+    dimensions: 3,
+    vector: "[1,0,0]",
+    metadata: {},
+    embedded_at: FIXED_NOW,
+    indexed_at: FIXED_NOW,
+    updated_at: null
+  });
+  const vectorStore = new PostgresVectorStore({
+    chunkStore: chunkIndex,
+    pool: pool as never,
+    dimensions: 3,
+    now: () => FIXED_NOW
+  });
+
+  const result = await vectorStore.findNearestVectors({
+    vector: [1, 0, 0],
+    filter: makeIndexFilter(),
+    topK: 1,
+    embeddingModel: "same-model",
+    embeddingProvider: "provider",
+    embeddingConfigHash: "required-hash"
+  });
+
+  assert.equal(result.candidates.length, 0);
+});
+
+test("postgres vector readiness fails when embedding identity filter index is missing", async () => {
+  const vectorStore = new PostgresVectorStore({
+    chunkStore: new InMemoryRagIndex({ now: () => FIXED_NOW }),
+    pool: new MockPgVectorPool({ identityIndexExists: false }) as never,
+    dimensions: 3,
+    now: () => FIXED_NOW
+  });
+
+  const readiness = await vectorStore.readinessCheck();
+
+  assert.equal(readiness.status, "failed");
+  assert.deepEqual(
+    readiness.checks
+      .filter((check) => check.id === "vector_identity_filter_index")
+      .map((check) => check.status),
+    ["failed"]
+  );
+});
+
+interface MockPgVectorPoolOptions {
+  readonly identityIndexExists?: boolean;
+}
+
 class MockPgVectorPool {
   private readonly rows: MockVectorRow[] = [];
+  private readonly options: Required<MockPgVectorPoolOptions>;
+
+  constructor(options: MockPgVectorPoolOptions = {}) {
+    this.options = {
+      identityIndexExists: options.identityIndexExists ?? true
+    };
+  }
+
+  insertRow(row: MockVectorRow): void {
+    this.rows.push(row);
+  }
 
   async connect(): Promise<MockPgVectorClient> {
-    return new MockPgVectorClient(this.rows);
+    return new MockPgVectorClient(this.rows, this.options);
   }
 
   async query<T>(
     sql: string,
     params: readonly unknown[] = []
   ): Promise<{ rows: T[]; rowCount: number }> {
-    return queryMockRows<T>(this.rows, sql, params);
+    return queryMockRows<T>(this.rows, sql, params, this.options);
   }
 }
 
 class MockPgVectorClient {
-  constructor(private readonly rows: MockVectorRow[]) {}
+  constructor(
+    private readonly rows: MockVectorRow[],
+    private readonly options: Required<MockPgVectorPoolOptions>
+  ) {}
 
   async query<T>(
     sql: string,
     params: readonly unknown[] = []
   ): Promise<{ rows: T[]; rowCount: number }> {
-    return queryMockRows<T>(this.rows, sql, params);
+    return queryMockRows<T>(this.rows, sql, params, this.options);
   }
 
   release(): void {
@@ -113,7 +213,8 @@ interface MockVectorRow {
 function queryMockRows<T>(
   rows: MockVectorRow[],
   sql: string,
-  params: readonly unknown[]
+  params: readonly unknown[],
+  options: Required<MockPgVectorPoolOptions>
 ): { rows: T[]; rowCount: number } {
   const normalized = sql.toLowerCase();
   if (
@@ -168,6 +269,37 @@ function queryMockRows<T>(
     return { rows: [], rowCount: before - rows.length };
   }
 
+  if (normalized.includes("metadata->>'embeddingprovider' as embedding_provider")) {
+    const grouped = new Map<string, MockVectorRow[]>();
+    for (const row of rows) {
+      const key = JSON.stringify({
+        tenant_id: row.tenant_id,
+        namespace_id: row.namespace_id,
+        embedding_provider: row.metadata["embeddingProvider"] ?? null,
+        embedding_model: row.embedding_model,
+        embedding_config_hash: row.metadata["embeddingConfigHash"] ?? null,
+        embedding_index_config_hash: row.metadata["embeddingIndexConfigHash"] ?? null
+      });
+      grouped.set(key, [...(grouped.get(key) ?? []), row]);
+    }
+    return {
+      rows: [...grouped.entries()].map(([key, group]) => {
+        const parsed = JSON.parse(key) as Record<string, string | null>;
+        return {
+          tenant_id: parsed["tenant_id"],
+          namespace_id: parsed["namespace_id"],
+          embedding_provider: parsed["embedding_provider"],
+          embedding_model: parsed["embedding_model"],
+          embedding_config_hash: parsed["embedding_config_hash"],
+          embedding_index_config_hash: parsed["embedding_index_config_hash"],
+          vector_count: String(group.length),
+          document_count: String(new Set(group.map((row) => row.document_id)).size)
+        };
+      }) as T[],
+      rowCount: grouped.size
+    };
+  }
+
   if (normalized.includes("count(*)")) {
     if (normalized.includes("dimensions <>")) {
       return { rows: [{ count: "0" }] as T[], rowCount: 1 };
@@ -184,21 +316,32 @@ function queryMockRows<T>(
   }
 
   if (normalized.includes("pg_indexes")) {
-    return { rows: [{ exists: true }] as T[], rowCount: 1 };
+    const exists = normalized.includes("rag_chunk_vectors_identity_idx")
+      ? options.identityIndexExists
+      : true;
+    return { rows: [{ exists }] as T[], rowCount: 1 };
   }
 
-  if (normalized.includes("order by vector <=>")) {
+  if (normalized.includes("<=>") && normalized.includes("limit $8")) {
     const queryVector = parseVectorLiteral(String(params[0]));
     const tenantId = String(params[1]);
     const namespaceId = String(params[2]);
     const dimensions = Number(params[3]);
-    const limit = Number(params[4]);
+    const embeddingModel = params[4] === null ? undefined : String(params[4]);
+    const embeddingProvider = params[5] === null ? undefined : String(params[5]);
+    const embeddingConfigHash = params[6] === null ? undefined : String(params[6]);
+    const limit = Number(params[7]);
     const scored = rows
       .filter(
         (row) =>
           row.tenant_id === tenantId &&
           row.namespace_id === namespaceId &&
-          row.dimensions === dimensions
+          row.dimensions === dimensions &&
+          (embeddingModel === undefined || row.embedding_model === embeddingModel) &&
+          (embeddingProvider === undefined ||
+            row.metadata["embeddingProvider"] === embeddingProvider) &&
+          (embeddingConfigHash === undefined ||
+            row.metadata["embeddingConfigHash"] === embeddingConfigHash)
       )
       .map((row) => ({
         ...row,

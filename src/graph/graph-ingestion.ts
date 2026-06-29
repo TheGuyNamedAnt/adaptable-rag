@@ -7,6 +7,11 @@ import {
   type GraphExtractionResult,
   type GraphExtractor
 } from "./graph-extractor.js";
+import {
+  checkGraphIntegrity,
+  type GraphIntegrityOptions,
+  type GraphIntegrityResult
+} from "./graph-integrity.js";
 import type { GraphOntology } from "./graph-types.js";
 import type { GraphStore, GraphStoreWriteResult } from "./in-memory-graph-store.js";
 
@@ -38,6 +43,10 @@ export interface GraphIngestionTrace {
   readonly documentCount: number;
   readonly chunkCount: number;
   readonly extractionStatus?: GraphExtractionResult["status"];
+  readonly graphIntegrityStatus?: "passed" | "failed";
+  readonly graphIntegrityIssueCount?: number;
+  readonly graphIntegrityErrorCount?: number;
+  readonly graphIntegrityWarningCount?: number;
   readonly entityCount: number;
   readonly relationCount: number;
   readonly storedEntityCount: number;
@@ -51,15 +60,21 @@ export interface GraphIngestionTrace {
 export interface GraphIngestionResult {
   readonly status: GraphIngestionStatus;
   readonly extraction?: GraphExtractionResult;
+  readonly graphIntegrity?: GraphIntegrityResult;
   readonly storeWrite?: GraphStoreWriteResult;
   readonly approval?: GraphApprovalRunResult;
   readonly trace: GraphIngestionTrace;
+}
+
+export interface GraphIngestionIntegrityOptions extends GraphIntegrityOptions {
+  readonly enabled?: boolean;
 }
 
 export interface GraphIngestionRunnerOptions {
   readonly extractor: GraphExtractor;
   readonly graphStore: GraphStore;
   readonly approvalRunner?: GraphApprovalRunner;
+  readonly graphIntegrity?: GraphIngestionIntegrityOptions;
   readonly now?: () => string;
 }
 
@@ -67,12 +82,17 @@ export class GraphIngestionRunner {
   private readonly extractor: GraphExtractor;
   private readonly graphStore: GraphStore;
   private readonly approvalRunner: GraphApprovalRunner | undefined;
+  private readonly graphIntegrityEnabled: boolean;
+  private readonly graphIntegrityOptions: GraphIntegrityOptions;
   private readonly now: () => string;
 
   constructor(options: GraphIngestionRunnerOptions) {
     this.extractor = options.extractor;
     this.graphStore = options.graphStore;
     this.approvalRunner = options.approvalRunner;
+    const { enabled = true, ...graphIntegrityOptions } = options.graphIntegrity ?? {};
+    this.graphIntegrityEnabled = enabled;
+    this.graphIntegrityOptions = graphIntegrityOptions;
     this.now = options.now ?? (() => new Date().toISOString());
   }
 
@@ -122,6 +142,30 @@ export class GraphIngestionRunner {
       };
     }
 
+    const graphIntegrity = this.graphIntegrityEnabled
+      ? checkGraphIntegrity({
+          batch: extraction.batch,
+          chunks: request.chunks,
+          options: this.graphIntegrityOptions
+        })
+      : undefined;
+    if (graphIntegrity?.valid === false) {
+      return {
+        status: "failed",
+        extraction,
+        graphIntegrity,
+        trace: buildTrace({
+          request,
+          ingestionId,
+          startedAt,
+          finishedAt: this.now(),
+          status: "failed",
+          extraction,
+          graphIntegrity
+        })
+      };
+    }
+
     const storeWrite = this.graphStore.addExtractionBatch(extraction.batch);
     const approval =
       storeWrite.accepted && this.approvalRunner && request.approvalFilter
@@ -135,6 +179,7 @@ export class GraphIngestionRunner {
     return {
       status: storeWrite.accepted ? "succeeded" : "failed",
       extraction,
+      ...(graphIntegrity === undefined ? {} : { graphIntegrity }),
       storeWrite,
       ...(approval === undefined ? {} : { approval }),
       trace: buildTrace({
@@ -144,6 +189,7 @@ export class GraphIngestionRunner {
         finishedAt: this.now(),
         status: storeWrite.accepted ? "succeeded" : "failed",
         extraction,
+        ...(graphIntegrity === undefined ? {} : { graphIntegrity }),
         storeWrite,
         ...(approval === undefined ? {} : { approval })
       })
@@ -158,6 +204,7 @@ function buildTrace(input: {
   readonly finishedAt: string;
   readonly status: GraphIngestionStatus;
   readonly extraction?: GraphExtractionResult;
+  readonly graphIntegrity?: GraphIntegrityResult;
   readonly storeWrite?: GraphStoreWriteResult;
   readonly approval?: GraphApprovalRunResult;
 }): GraphIngestionTrace {
@@ -177,6 +224,14 @@ function buildTrace(input: {
     documentCount: input.request.documents.length,
     chunkCount: input.request.chunks.length,
     ...(input.extraction === undefined ? {} : { extractionStatus: input.extraction.status }),
+    ...(input.graphIntegrity === undefined
+      ? {}
+      : {
+          graphIntegrityStatus: input.graphIntegrity.valid ? "passed" : "failed",
+          graphIntegrityIssueCount: input.graphIntegrity.issues.length,
+          graphIntegrityErrorCount: input.graphIntegrity.errors.length,
+          graphIntegrityWarningCount: input.graphIntegrity.warnings.length
+        }),
     entityCount: extractionEntityCount,
     relationCount: extractionRelationCount,
     storedEntityCount: input.storeWrite?.entityCount ?? 0,

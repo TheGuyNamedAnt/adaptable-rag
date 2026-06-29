@@ -220,6 +220,17 @@ function policy(overrides: Partial<ChunkingPolicy> = {}): ChunkingPolicy {
   };
 }
 
+test("default policy can chunk near-two-megabyte structured text documents", () => {
+  const line = '{"key":"value","url":"https://example.com/path","label":"metadata"}\n';
+  const body = line.repeat(Math.ceil(1_950_000 / line.length)).slice(0, 1_950_000);
+  const result = chunkDocument({
+    document: documentWithBody(body)
+  });
+
+  assert.ok(result.chunks.length > 500);
+  assert.ok(result.chunks.length <= DEFAULT_CHUNKING_POLICY.maxChunksPerDocument);
+});
+
 test("keeps character-window chunk text equal to the exact source range", () => {
   const document = documentWithBody("  Alpha beta gamma\nDelta epsilon zeta\n  Eta theta.  ");
   const result = chunkDocument({
@@ -380,7 +391,7 @@ test("preserves table layout regions as atomic chunks", () => {
     document,
     policy: policy({
       boundaryStrategy: "character_window",
-      maxCharacters: 20,
+      maxCharacters: 80,
       preserveStructuredLayoutRegions: true
     })
   });
@@ -395,6 +406,42 @@ test("preserves table layout regions as atomic chunks", () => {
     result.chunks.some((chunk) => chunk.text.includes("Investor | Shares") && chunk.text !== table),
     false
   );
+});
+
+test("splits oversized protected table regions into index-safe chunks", () => {
+  const prefix = "Intro paragraph before table.\n\n";
+  const table = Array.from({ length: 12 }, (_, index) => `Metric ${index} | ${index * 10}`).join(
+    "\n"
+  );
+  const suffix = "\n\nClosing paragraph after table.";
+  const body = `${prefix}${table}${suffix}`;
+  const document: RagDocument = {
+    ...documentWithBody(body),
+    layout: tableOnlyLayoutForBody(body, table)
+  };
+  const chunkingPolicy = policy({
+    boundaryStrategy: "line",
+    maxCharacters: 60,
+    preserveStructuredLayoutRegions: true
+  });
+  const chunks = chunkDocument({
+    document,
+    policy: chunkingPolicy
+  }).chunks;
+  const tableChunks = chunks.filter((chunk) => chunk.layoutRegionIds?.includes("region_table"));
+
+  assert.equal(
+    chunks.every((chunk) => chunk.text.length <= chunkingPolicy.maxCharacters),
+    true
+  );
+  assert.ok(tableChunks.length > 1);
+  assert.equal(
+    tableChunks.some((chunk) => chunk.text === table),
+    false
+  );
+  for (const chunk of chunks) {
+    assert.equal(validateChunk(chunk, document, chunkingPolicy).valid, true);
+  }
 });
 
 test("drops low-information page furniture split by protected layout regions", () => {

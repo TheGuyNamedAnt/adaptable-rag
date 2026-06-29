@@ -17,17 +17,16 @@ const options = parseArgs(process.argv.slice(2));
 try {
   const env = await syncEnv(options.envFile);
   const runtimeOptions = optionsFromEnv(options, env);
-  const queue = await readRequiredJson(runtimeOptions.queuePath, "Human review queue");
-  const ledger = await readOptionalJson(
-    runtimeOptions.ledgerPath,
-    runtimeOptions.ledgerExplicit,
-    "Review decision ledger"
-  );
-  const ticketExport = buildReviewTicketPayloads({
-    queue,
-    ...(ledger === undefined ? {} : { ledger }),
-    includeResolved: runtimeOptions.includeResolved
-  });
+  const ticketExport =
+    runtimeOptions.ticketsPath === undefined
+      ? await buildTicketsFromQueueAndLedger(runtimeOptions)
+      : {
+          tickets: await readRequiredJson(
+            runtimeOptions.ticketsPath,
+            "Review ticket payloads",
+            "Run scripts/export-admin-review-workflow.mjs or npm run review:sync without --tickets."
+          )
+        };
   const sinks = buildSinks(runtimeOptions, env);
   const report = await syncReviewTickets({
     tickets: ticketExport.tickets,
@@ -85,12 +84,30 @@ async function writeJson(filePath, value) {
   await rename(`${filePath}.tmp`, filePath);
 }
 
-async function readRequiredJson(filePath, label) {
+async function buildTicketsFromQueueAndLedger(runtimeOptions) {
+  const queue = await readRequiredJson(
+    runtimeOptions.queuePath,
+    "Human review queue",
+    "Run npm run review:queue first."
+  );
+  const ledger = await readOptionalJson(
+    runtimeOptions.ledgerPath,
+    runtimeOptions.ledgerExplicit,
+    "Review decision ledger"
+  );
+  return buildReviewTicketPayloads({
+    queue,
+    ...(ledger === undefined ? {} : { ledger }),
+    includeResolved: runtimeOptions.includeResolved
+  });
+}
+
+async function readRequiredJson(filePath, label, hint) {
   try {
     return JSON.parse(await readFile(filePath, "utf8"));
   } catch (error) {
     if (isNotFound(error)) {
-      throw new Error(`${label} not found at ${filePath}. Run npm run review:queue first.`);
+      throw new Error(`${label} not found at ${filePath}. ${hint}`);
     }
     if (error instanceof SyntaxError) {
       throw new Error(`${label} at ${filePath} is not valid JSON.`);
@@ -168,6 +185,7 @@ async function syncEnv(envFile) {
 
 function optionsFromEnv(options, env) {
   return {
+    ticketsPath: options.ticketsPath ?? env.RAG_REVIEW_TICKETS_PATH,
     queuePath:
       options.queuePath ??
       env.RAG_REVIEW_QUEUE_PATH ??
@@ -202,6 +220,9 @@ function parseArgs(args) {
     switch (arg) {
       case "--queue":
         options.queuePath = requiredValue(args, ++index, arg);
+        break;
+      case "--tickets":
+        options.ticketsPath = requiredValue(args, ++index, arg);
         break;
       case "--ledger":
         options.ledgerPath = requiredValue(args, ++index, arg);

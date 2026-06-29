@@ -16,6 +16,7 @@ export type RetrievalRejectionCode =
   | "invalid_filter"
   | "access_denied_or_missing_chunk"
   | "stale_vector"
+  | "embedding_identity_mismatch"
   | "vector_dimension_mismatch"
   | "candidate_limit_exceeded"
   | "rerank_unknown_candidate"
@@ -29,9 +30,16 @@ export interface RetrievalRequest {
   readonly mode?: RetrievalMode;
   readonly candidatePoolLimit?: number;
   readonly graph?: RetrievalGraphRequestControls;
+  readonly intent?: RetrievalRequestIntent;
   readonly includeRejected?: boolean;
   readonly retrievalId?: string;
   readonly requestedAt?: string;
+}
+
+export interface RetrievalRequestIntent {
+  readonly primary: string;
+  readonly secondary?: readonly string[];
+  readonly sourceHints?: readonly string[];
 }
 
 export interface RetrievalGraphRequestControls {
@@ -85,6 +93,7 @@ export interface RetrievalTrace {
   readonly candidatePoolSize: number;
   readonly returnedCount: number;
   readonly rejectedCount: number;
+  readonly freshness?: RetrievalFreshnessTrace;
   readonly graphTraversalDepth?: number;
   readonly graphVisitedEntityCount?: number;
   readonly graphTraversedEdgeCount?: number;
@@ -96,12 +105,20 @@ export interface RetrievalTrace {
   readonly adaptiveStrategy?: RetrievalStrategyTrace;
 }
 
+export interface RetrievalFreshnessTrace {
+  readonly applied: boolean;
+  readonly boostedCandidateCount: number;
+  readonly reason: string;
+}
+
 export type AdaptiveRetrievalStrategy =
   | "keyword_only"
   | "vector_only"
   | "hybrid"
   | "graph_augmented"
   | "visual_retrieval"
+  | "graph_deepening"
+  | "freshness_expansion"
   | "expanded_candidate_pool"
   | "refuse_missing_or_denied";
 
@@ -113,6 +130,7 @@ export type RetrievalDiagnosisCode =
   | "access_denied_or_missing_source"
   | "graph_requested"
   | "visual_requested"
+  | "freshness_requested"
   | "trusted_citation_risk"
   | "stale_or_missing_source"
   | "retriever_error";
@@ -140,6 +158,9 @@ export interface RetrievalBudgetTrace {
   readonly requestedTopK: number;
   readonly maxRetrievalCalls: number;
   readonly enabledQueryCount: number;
+  readonly primaryIntent?: string;
+  readonly secondaryIntentHashes?: readonly string[];
+  readonly sourceHintHashes?: readonly string[];
   readonly totalCandidatePoolLimit?: number;
   readonly disabledQueryIds: readonly string[];
   readonly branches: readonly RetrievalBudgetBranchTrace[];
@@ -152,8 +173,25 @@ export interface RetrievalBudgetBranchTrace {
   readonly topK: number;
   readonly fusionWeight: number;
   readonly candidatePoolLimit?: number;
+  readonly routeFilter?: RetrievalRouteFilterTrace;
+  readonly routePreference?: RetrievalRoutePreferenceTrace;
+  readonly primaryIntent?: string;
+  readonly sourceHintHashes?: readonly string[];
   readonly graph?: RetrievalGraphBudgetTraceControls;
   readonly reasons: readonly string[];
+}
+
+export interface RetrievalRoutePreferenceTrace extends RetrievalRouteFilterTrace {
+  readonly fusionWeightMultiplier: number;
+}
+
+export interface RetrievalRouteFilterTrace {
+  readonly sourceIdCount: number;
+  readonly sourceIdHashes: readonly string[];
+  readonly sourceKindCount: number;
+  readonly sourceKindHashes: readonly string[];
+  readonly trustTierCount: number;
+  readonly trustTierHashes: readonly string[];
 }
 
 export interface RetrievalResult {
